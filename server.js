@@ -116,6 +116,212 @@ function isAdmin(msg) {
   return msg.from.id === ADMIN_ID;
 }
 
+
+
+
+// ===== КОМАНДА /add_product =====
+const productWizards = {}; // Храним состояния пользователей
+
+bot.onText(/\/add_product/, async (msg) => {
+  if (!isAdmin(msg)) {
+    bot.sendMessage(msg.chat.id, '⛔ Команда только для администратора');
+    return;
+  }
+
+  const chatId = msg.chat.id;
+  
+  // Инициализируем визард
+  productWizards[chatId] = {
+    step: 1,
+    product: {}
+  };
+
+  bot.sendMessage(chatId, '🛍️ *Добавление нового товара*\n\nВведите название товара:', {
+    parse_mode: 'Markdown'
+  });
+});
+
+// Обработка ответов
+bot.on('message', async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  const wizard = productWizards[chatId];
+  
+  if (!wizard || msg.text?.startsWith('/')) return;
+
+  try {
+    switch (wizard.step) {
+      case 1: // Название
+        wizard.product.name = msg.text;
+        wizard.step = 2;
+        bot.sendMessage(chatId, '💰 *Введите цену в рублях* (только цифры):', {
+          parse_mode: 'Markdown'
+        });
+        break;
+
+      case 2: // Цена
+        const price = parseInt(msg.text);
+        if (isNaN(price) || price <= 0) {
+          bot.sendMessage(chatId, '❌ Неверная цена. Введите число больше 0:');
+          return;
+        }
+        wizard.product.price = price;
+        wizard.step = 3;
+        bot.sendMessage(chatId, '📸 *Отправьте ссылку на изображение*\n\nПример: https://i.imgur.com/xxx.png', {
+          parse_mode: 'Markdown'
+        });
+        break;
+
+      case 3: // Фото
+        // Проверяем, что это URL
+        if (!msg.text.startsWith('http')) {
+          bot.sendMessage(chatId, '❌ Это не ссылка. Отправьте полный URL:');
+          return;
+        }
+        wizard.product.image_url = msg.text;
+        wizard.step = 4;
+        
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: '🎁 Подарок', callback_data: 'gift_true' },
+              { text: '📦 Обычный', callback_data: 'gift_false' }
+            ]
+          ]
+        };
+        
+        bot.sendMessage(chatId, '🎁 *Это подарочный товар?*', {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        });
+        break;
+    }
+  } catch (error) {
+    console.error('Ошибка в визарде:', error);
+    bot.sendMessage(chatId, '❌ Ошибка. Начните заново: /add_product');
+    delete productWizards[chatId];
+  }
+});
+
+// Обработка кнопок подарка
+bot.on('callback_query', async (callbackQuery) => {
+  const msg = callbackQuery.message;
+  const data = callbackQuery.data;
+  
+  if (!isAdmin(callbackQuery)) {
+    bot.answerCallbackQuery(callbackQuery.id, { text: '⛔ Доступ запрещен' });
+    return;
+  }
+
+  const chatId = msg.chat.id;
+  const wizard = productWizards[chatId];
+
+  if (!wizard || wizard.step !== 4) {
+    bot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+
+  try {
+    // Определяем ID товара
+    const productId = 'prod_' + Date.now() + Math.random().toString(36).substr(2, 5);
+    
+    // Сохраняем тип товара
+    wizard.product.is_gift = data === 'gift_true';
+    wizard.product.id = productId;
+
+    // Сохраняем в базу данных
+    await pool.query(
+      `INSERT INTO products (id, name, price, image_url, is_gift) 
+       VALUES ($1, $2, $3, $4, $5) 
+       ON CONFLICT (id) DO UPDATE SET 
+         name = EXCLUDED.name,
+         price = EXCLUDED.price,
+         image_url = EXCLUDED.image_url,
+         is_gift = EXCLUDED.is_gift`,
+      [
+        wizard.product.id,
+        wizard.product.name,
+        wizard.product.price,
+        wizard.product.image_url,
+        wizard.product.is_gift
+      ]
+    );
+
+    // Формируем ответ
+    const productText = `
+✅ *Товар успешно добавлен!*
+
+*ID:* ${wizard.product.id}
+*Название:* ${wizard.product.name}
+*Цена:* ${wizard.product.price} ₽
+*Тип:* ${wizard.product.is_gift ? '🎁 Подарок' : '📦 Обычный'}
+*Изображение:* ${wizard.product.image_url}
+
+Товар появится на сайте после обновления страницы.
+    `;
+
+    // Удаляем клавиатуру и отправляем результат
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: msg.message_id }
+    );
+
+    bot.sendMessage(chatId, productText, { parse_mode: 'Markdown' });
+
+    // Очищаем визард
+    delete productWizards[chatId];
+
+    bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар сохранен' });
+
+  } catch (error) {
+    console.error('Ошибка сохранения товара:', error);
+    bot.sendMessage(chatId, '❌ Ошибка сохранения товара в базу данных');
+    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка' });
+    delete productWizards[chatId];
+  }
+});
+
+// Команда /products
+bot.onText(/\/products/, async (msg) => {
+  if (!isAdmin(msg)) return;
+
+  try {
+    const result = await pool.query('SELECT * FROM products ORDER BY price');
+    
+    if (result.rows.length === 0) {
+      bot.sendMessage(msg.chat.id, '📭 В базе нет товаров');
+      return;
+    }
+
+    let productsText = '🛍️ *Список товаров:*\n\n';
+    
+    result.rows.forEach((product, index) => {
+      productsText += `${index + 1}. *${product.name}*\n`;
+      productsText += `   ID: ${product.id}\n`;
+      productsText += `   Цена: ${product.price} ₽\n`;
+      productsText += `   Тип: ${product.is_gift ? '🎁 Подарок' : '📦 Обычный'}\n`;
+      productsText += `   Изображение: ${product.image_url}\n\n`;
+    });
+
+    // Разбиваем на части если сообщение слишком длинное
+    const maxLength = 4000;
+    if (productsText.length > maxLength) {
+      const parts = productsText.match(new RegExp(`.{1,${maxLength}}`, 'g'));
+      for (const part of parts) {
+        await bot.sendMessage(msg.chat.id, part, { parse_mode: 'Markdown' });
+      }
+    } else {
+      bot.sendMessage(msg.chat.id, productsText, { parse_mode: 'Markdown' });
+    }
+
+  } catch (error) {
+    console.error('Ошибка получения товаров:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
+  }
+});
+
+
 // Команда /start
 bot.onText(/\/start/, async (msg) => {
   if (!isAdmin(msg)) {
