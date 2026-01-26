@@ -763,34 +763,6 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-// Эндпоинт для исправления БД (одноразовый, потом удали)
-app.get('/api/fix-database', async (req, res) => {
-  try {
-    // 1. Изменяем products.id
-    await pool.query(`
-      ALTER TABLE products 
-      ALTER COLUMN id TYPE VARCHAR(50)
-    `);
-    
-    // 2. Проверяем другие таблицы
-    await pool.query(`
-      ALTER TABLE orders 
-      ALTER COLUMN order_id TYPE VARCHAR(50)
-    `);
-    
-    res.json({ 
-      success: true, 
-      message: 'База данных исправлена: VARCHAR(20) → VARCHAR(50)' 
-    });
-  } catch (error) {
-    console.error('Ошибка исправления БД:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
 // 7. Добавление товара (для админки через бота)
 app.post('/api/products', async (req, res) => {
   try {
