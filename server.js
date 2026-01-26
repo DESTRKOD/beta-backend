@@ -137,7 +137,7 @@ bot.onText(/\/add_product/, async (msg) => {
   };
 
   bot.sendMessage(chatId, '🛍️ *Добавление нового товара*\n\nВведите название товара:', {
-    parse_mode: 'Markdown'
+    parse_mode: 'HTML'
   });
 });
 
@@ -156,7 +156,7 @@ bot.on('message', async (msg) => {
         wizard.product.name = msg.text;
         wizard.step = 2;
         bot.sendMessage(chatId, '💰 *Введите цену в рублях* (только цифры):', {
-          parse_mode: 'Markdown'
+          parse_mode: 'HTML'
         });
         break;
 
@@ -169,7 +169,7 @@ bot.on('message', async (msg) => {
         wizard.product.price = price;
         wizard.step = 3;
         bot.sendMessage(chatId, '📸 *Отправьте ссылку на изображение*\n\nПример: https://i.imgur.com/xxx.png', {
-          parse_mode: 'Markdown'
+          parse_mode: 'HTML'
         });
         break;
 
@@ -267,7 +267,7 @@ bot.on('callback_query', async (callbackQuery) => {
       { chat_id: chatId, message_id: msg.message_id }
     );
 
-    bot.sendMessage(chatId, productText, { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId, productText, { parse_mode: 'HTML' });
 
     // Очищаем визард
     delete productWizards[chatId];
@@ -309,10 +309,10 @@ bot.onText(/\/products/, async (msg) => {
     if (productsText.length > maxLength) {
       const parts = productsText.match(new RegExp(`.{1,${maxLength}}`, 'g'));
       for (const part of parts) {
-        await bot.sendMessage(msg.chat.id, part, { parse_mode: 'Markdown' });
+        await bot.sendMessage(msg.chat.id, part, { parse_mode: 'HTML' });
       }
     } else {
-      bot.sendMessage(msg.chat.id, productsText, { parse_mode: 'Markdown' });
+      bot.sendMessage(msg.chat.id, productsText, { parse_mode: 'HTML' });
     }
 
   } catch (error) {
