@@ -726,6 +726,16 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
+// API для фронтенда
+app.get('/api/products', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM products ORDER BY price');
+    res.json({ success: true, products: result.rows });
+  } catch (error) {
+    console.error('Ошибка получения товаров:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
 // 5. Проверка статуса заказа
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
