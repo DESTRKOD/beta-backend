@@ -573,8 +573,8 @@ app.post('/api/create-order', async (req, res) => {
       description: `Заказ #${orderId}`,
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
-      success_url: `${req.headers.origin || 'https://DESTRKOD.github.io'}/duck2/beta-duck.html?payment=success`,
-      fail_url: `${req.headers.origin || 'https://DESTRKOD.github.io'}/duck2/beta-duck.html?payment=fail`,
+      success_url: `${req.headers.origin || 'https://DESTRKOD.github.io'}/duck2/beta-duck.html?payment=success&order=${orderId}`,
+      fail_url: `${req.headers.origin || 'https://DESTRKOD.github.io'}/duck2/beta-duck.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 часа
     };
     
