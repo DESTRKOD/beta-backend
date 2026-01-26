@@ -763,33 +763,27 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-// ВРЕМЕННЫЙ эндпоинт для исправления БД - УДАЛИ ПОТОМ!
-app.get('/fix-db-now', async (req, res) => {
+// Эндпоинт проверки структуры БД
+app.get('/check-db-structure', async (req, res) => {
   try {
-    // 1. Меняем тип products.id
-    await pool.query(`
-      ALTER TABLE products 
-      ALTER COLUMN id TYPE VARCHAR(100)
+    const result = await pool.query(`
+      SELECT 
+        table_name,
+        column_name,
+        data_type,
+        character_maximum_length
+      FROM information_schema.columns
+      WHERE table_name IN ('products', 'orders')
+      ORDER BY table_name, ordinal_position
     `);
     
-    // 2. Меняем тип orders.order_id
-    await pool.query(`
-      ALTER TABLE orders 
-      ALTER COLUMN order_id TYPE VARCHAR(100)
-    `);
-    
-    res.json({ 
-      success: true, 
-      message: '✅ БД исправлена! products.id и orders.order_id теперь VARCHAR(100)',
-      timestamp: new Date().toISOString()
+    res.json({
+      success: true,
+      tables: result.rows,
+      message: 'Проверь что products.id имеет character_maximum_length: 100'
     });
-    
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      error: error.message,
-      hint: 'Возможно, уже исправлено'
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
