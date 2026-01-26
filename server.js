@@ -282,6 +282,87 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
+
+// Команда /delete_product
+bot.onText(/\/delete_product/, async (msg) => {
+  if (!isAdmin(msg)) {
+    bot.sendMessage(msg.chat.id, '⛔ Команда только для администратора');
+    return;
+  }
+
+  try {
+    const result = await pool.query('SELECT id, name, price FROM products ORDER BY name');
+    
+    if (result.rows.length === 0) {
+      bot.sendMessage(msg.chat.id, '📭 В базе нет товаров для удаления');
+      return;
+    }
+
+    // Создаем клавиатуру с товарами
+    const keyboard = {
+      inline_keyboard: result.rows.map(product => [
+        {
+          text: `${product.name} (${product.price} ₽)`,
+          callback_data: `delete_product:${product.id}`
+        }
+      ])
+    };
+
+    bot.sendMessage(msg.chat.id, '🗑️ *Выберите товар для удаления:*', {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+
+  } catch (error) {
+    console.error('Ошибка получения товаров для удаления:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
+  }
+});
+
+// Обработка нажатия на товар для удаления
+bot.on('callback_query', async (callbackQuery) => {
+  const msg = callbackQuery.message;
+  const data = callbackQuery.data;
+  
+  if (!isAdmin(callbackQuery)) {
+    bot.answerCallbackQuery(callbackQuery.id, { text: '⛔ Доступ запрещен' });
+    return;
+  }
+
+  if (data.startsWith('delete_product:')) {
+    const productId = data.split(':')[1];
+    
+    try {
+      // Получаем информацию о товаре перед удалением
+      const productResult = await pool.query(
+        'SELECT name FROM products WHERE id = $1',
+        [productId]
+      );
+      
+      if (productResult.rows.length === 0) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Товар не найден' });
+        return;
+      }
+      
+      const productName = productResult.rows[0].name;
+      
+      // Удаляем товар
+      await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+      
+      // Обновляем сообщение
+      await bot.editMessageText(`✅ Товар "${productName}" удален`, {
+        chat_id: msg.chat.id,
+        message_id: msg.message_id
+      });
+      
+      bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар удален' });
+      
+    } catch (error) {
+      console.error('Ошибка удаления товара:', error);
+      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка удаления' });
+    }
+  }
+});
 // Команда /products
 bot.onText(/\/products/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -420,19 +501,32 @@ bot.on('callback_query', async (callbackQuery) => {
 // Отправка уведомления о новом заказе
 async function sendNewOrderNotification(orderId, total, email) {
   try {
-    const result = await pool.query('SELECT items FROM orders WHERE order_id = $1', [orderId]);
+    const result = await pool.query(
+      'SELECT items FROM orders WHERE order_id = $1',
+      [orderId]
+    );
     const items = result.rows[0]?.items || {};
     
     let itemsText = '';
+    let totalItems = 0;
+    
+    // Получаем названия товаров из базы
     for (const [id, qty] of Object.entries(items)) {
-      // Здесь можно получить название товара из БД
-      itemsText += `• Товар ${id}: ${qty} шт.\n`;
+      const productResult = await pool.query(
+        'SELECT name FROM products WHERE id = $1',
+        [id]
+      );
+      
+      const productName = productResult.rows[0]?.name || `Товар ${id}`;
+      itemsText += `• ${productName}: ${qty} шт.\n`;
+      totalItems += parseInt(qty);
     }
     
-    const text = `🛒 Новый заказ #${orderId}\n\n` +
-      `Сумма: ${formatRub(total)}\n` +
-      `Почта: ${email || 'не указана'}\n\n` +
-      `Состав заказа:\n${itemsText}`;
+    const text = `🛒 *Новый заказ #${orderId}*\n\n` +
+      `💰 Сумма: ${formatRub(total)}\n` +
+      `📦 Товаров: ${totalItems} шт.\n` +
+      `📧 Почта: ${email || 'не указана'}\n\n` +
+      `📋 *Состав заказа:*\n${itemsText}`;
     
     const keyboard = {
       inline_keyboard: [[
@@ -440,9 +534,62 @@ async function sendNewOrderNotification(orderId, total, email) {
       ]]
     };
     
-    await bot.sendMessage(ADMIN_ID, text, { reply_markup: keyboard });
+    await bot.sendMessage(ADMIN_ID, text, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
   } catch (error) {
     console.error('Ошибка отправки уведомления:', error);
+  }
+}
+
+// Также обнови функцию sendCodeNotification:
+async function sendCodeNotification(orderId, total, email, code) {
+  try {
+    const result = await pool.query(
+      'SELECT items FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    const items = result.rows[0]?.items || {};
+    
+    let itemsText = '';
+    let totalItems = 0;
+    
+    for (const [id, qty] of Object.entries(items)) {
+      const productResult = await pool.query(
+        'SELECT name FROM products WHERE id = $1',
+        [id]
+      );
+      
+      const productName = productResult.rows[0]?.name || `Товар ${id}`;
+      itemsText += `• ${productName}: ${qty} шт.\n`;
+      totalItems += parseInt(qty);
+    }
+    
+    const text = `📧 *Новая информация по заказу #${orderId}*\n\n` +
+      `💰 Сумма: ${formatRub(total)}\n` +
+      `📧 Почта: ${email}\n` +
+      `🔢 Код: ${code}\n` +
+      `📦 Товаров: ${totalItems} шт.\n\n` +
+      `📋 *Состав заказа:*\n${itemsText}`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Заказ готов', callback_data: `order_ready:${orderId}` },
+          { text: '❌ Неверный код', callback_data: `wrong_code:${orderId}` }
+        ]
+      ]
+    };
+    
+    await bot.sendMessage(ADMIN_ID, text, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+  } catch (error) {
+    console.error('Ошибка отправки уведомления о коде:', error);
   }
 }
 
@@ -640,7 +787,6 @@ app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
     
-    // Проверяем существование заказа
     const orderResult = await pool.query(
       'SELECT email, total FROM orders WHERE order_id = $1',
       [orderId]
@@ -650,26 +796,26 @@ app.post('/api/verify-code', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Order not found' });
     }
     
-    // Генерируем код (в реальной системе код должен быть предоставлен админом)
-    const generatedCode = generateCode();
-    
-    // Сохраняем код в БД
+    // Сохраняем код и меняем статус на "ожидание"
     await pool.query(
-      'UPDATE orders SET code = $1 WHERE order_id = $2',
-      [generatedCode, orderId]
+      'UPDATE orders SET code = $1, status = $2 WHERE order_id = $3',
+      [code, 'waiting', orderId] // status = 'waiting'
     );
     
-    // Отправляем уведомление админу с кодом
+    // Отправляем уведомление админу
     await sendCodeNotification(
       orderId,
       orderResult.rows[0].total,
       orderResult.rows[0].email,
-      generatedCode
+      code
     );
     
-    // В данной реализации всегда возвращаем успех
-    // В реальной системе нужно проверять код от админа
-    res.json({ success: true });
+    // Возвращаем success и статус
+    res.json({ 
+      success: true, 
+      status: 'waiting' // Добавляем статус в ответ
+    });
+    
   } catch (error) {
     console.error('Ошибка проверки кода:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
