@@ -814,18 +814,7 @@ app.post('/api/products', async (req, res) => {
   }
 });
 
-// 8. Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    services: {
-      database: 'connected',
-      telegram: 'connected',
-      bilee: 'configured'
-    }
-  });
-});
+
 
 // ===== ЗАГРУЗКА ТЕСТОВЫХ ТОВАРОВ =====
 async function loadSampleProducts() {
@@ -863,6 +852,96 @@ async function loadSampleProducts() {
     console.error('Ошибка загрузки тестовых товаров:', error);
   }
 }
+
+
+// ===== KEEP-ALIVE СИСТЕМА ДЛЯ RENDER =====
+
+// 1. Health check эндпоинт (уже есть, но улучшаем)
+app.get('/health', (req, res) => {
+  const stats = {
+    status: 'healthy',
+    service: 'duck-shop-server',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    config: {
+      shop_id: BILEE_SHOP_ID ? '✅ Настроен' : '❌ Нет',
+      bot_token: TELEGRAM_BOT_TOKEN ? '✅ Есть' : '❌ Нет',
+      admin_id: ADMIN_ID ? '✅ ' + ADMIN_ID : '❌ Нет',
+      database: '✅ PostgreSQL'
+    }
+  };
+  
+  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check`);
+  res.json(stats);
+});
+
+// 2. Wakeup эндпоинт для внешних пингов
+app.get('/wakeup', (req, res) => {
+  console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом`);
+  res.json({ 
+    status: 'awake', 
+    time: new Date().toISOString(),
+    message: 'Сервер активен и готов к работе'
+  });
+});
+
+// 3. Внутренний self-ping (когда сервер жив)
+let selfPingInterval;
+
+function startSelfPing() {
+  if (selfPingInterval) clearInterval(selfPingInterval);
+  
+  selfPingInterval = setInterval(async () => {
+    try {
+      const http = require('http');
+      const url = require('url');
+      
+      const serverUrl = process.env.SERVER_URL || 'https://duck-shop-server.onrender.com';
+      const parsed = new url.URL(serverUrl);
+      
+      const options = {
+        hostname: parsed.hostname,
+        port: 443,
+        path: '/health',
+        method: 'GET',
+        timeout: 10000,
+        headers: { 'User-Agent': 'DuckShop-SelfPing/1.0' }
+      };
+      
+      const req = http.request(options, (res) => {
+        const now = new Date().toLocaleTimeString('ru-RU');
+        console.log(`❤️ [${now}] Self-ping: ${res.statusCode}`);
+      });
+      
+      req.on('error', () => { /* Игнорируем ошибки */ });
+      req.on('timeout', () => { /* Игнорируем таймауты */ });
+      
+      req.end();
+      
+    } catch (err) {
+      // Молчим об ошибках
+    }
+  }, 10 * 60 * 1000); // Каждые 10 минут (меньше 15!)
+  
+  console.log('🔄 Self-ping system started (every 10 minutes)');
+}
+
+// 4. Запускаем при старте сервера
+startSelfPing();
+
+// 5. Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 Получен SIGTERM, останавливаем сервер...');
+  if (selfPingInterval) clearInterval(selfPingInterval);
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 Получен SIGINT, останавливаем сервер...');
+  if (selfPingInterval) clearInterval(selfPingInterval);
+  process.exit(0);
+});
 
 // ===== ЗАПУСК СЕРВЕРА =====
 async function startServer() {
