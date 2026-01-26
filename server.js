@@ -763,6 +763,36 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
+// ВРЕМЕННЫЙ эндпоинт для исправления БД - УДАЛИ ПОТОМ!
+app.get('/fix-db-now', async (req, res) => {
+  try {
+    // 1. Меняем тип products.id
+    await pool.query(`
+      ALTER TABLE products 
+      ALTER COLUMN id TYPE VARCHAR(100)
+    `);
+    
+    // 2. Меняем тип orders.order_id
+    await pool.query(`
+      ALTER TABLE orders 
+      ALTER COLUMN order_id TYPE VARCHAR(100)
+    `);
+    
+    res.json({ 
+      success: true, 
+      message: '✅ БД исправлена! products.id и orders.order_id теперь VARCHAR(100)',
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      hint: 'Возможно, уже исправлено'
+    });
+  }
+});
+
 // 7. Добавление товара (для админки через бота)
 app.post('/api/products', async (req, res) => {
   try {
