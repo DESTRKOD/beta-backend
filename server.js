@@ -80,6 +80,7 @@ async function initDB() {
         total INTEGER NOT NULL,
         email VARCHAR(100),
         code VARCHAR(6),
+        code_requested BOOLEAN DEFAULT FALSE,
         wrong_code_attempts INTEGER DEFAULT 0,
         payment_id INTEGER,
         payment_status VARCHAR(20) DEFAULT 'pending',
@@ -767,13 +768,21 @@ async function showOrderDetails(chatId, messageId, orderId) {
     // Создаем клавиатуру в зависимости от статуса
     let keyboardRows = [];
     
-    if (order.status === 'new' || order.status === 'confirmed') {
+    // Кнопка "Сделать готовым" показывается только если:
+    // 1. Заказ оплачен (payment_status = 'confirmed') ИЛИ
+    // 2. Уже есть email (статус email_entered или waiting_code_request) ИЛИ
+    // 3. Статус waiting (ожидание выполнения)
+    if ((order.payment_status === 'confirmed' || order.email) && order.status !== 'completed') {
       keyboardRows.push([
         { text: '✅ Сделать готовым', callback_data: `mark_completed:${orderId}` }
       ]);
     }
     
-    if (order.email && !order.code && order.status !== 'completed') {
+    // Кнопка "Запросить код" показывается если:
+    // 1. Есть email
+    // 2. Код еще не запрошен (code_requested = false)
+    // 3. Заказ не завершен
+    if (order.email && !order.code_requested && order.status !== 'completed') {
       keyboardRows.push([
         { text: '📝 Запросить код', callback_data: `request_code:${orderId}` }
       ]);
@@ -855,6 +864,24 @@ async function handleBackToOrders(msg) {
   }
 }
 
+// Запросить код от администратора
+async function handleRequestCode(orderId, msg) {
+  try {
+    // Помечаем, что код запрошен
+    await pool.query(
+      "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
+      [orderId]
+    );
+    
+    await bot.editMessageText(`📝 Код запрошен для заказа #${orderId}\n\nПользователю отправлен запрос на ввод кода.`, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+  } catch (error) {
+    console.error('Ошибка запроса кода:', error);
+  }
+}
+
 // Отметить заказ как готовый (из бота)
 async function handleMarkCompleted(orderId, msg) {
   try {
@@ -863,9 +890,6 @@ async function handleMarkCompleted(orderId, msg) {
       "UPDATE orders SET status = 'completed' WHERE order_id = $1",
       [orderId]
     );
-    
-    // Отправляем уведомление пользователю (здесь должен быть механизм уведомлений)
-    console.log(`Заказ ${orderId} отмечен как готовый из бота`);
     
     await bot.editMessageText(`✅ Заказ #${orderId} отмечен как готовый\n\nПользователь будет уведомлен о готовности заказа.`, {
       chat_id: msg.chat.id,
@@ -976,29 +1000,6 @@ async function sendCodeNotification(orderId, total, email, code) {
   }
 }
 
-// Обработка запроса кода
-async function handleRequestCode(orderId, msg) {
-  try {
-    const result = await pool.query('SELECT email FROM orders WHERE order_id = $1', [orderId]);
-    const email = result.rows[0]?.email;
-    
-    if (!email) {
-      await bot.editMessageText('❌ Email еще не указан для этого заказа', {
-        chat_id: msg.chat.id,
-        message_id: msg.message_id
-      });
-      return;
-    }
-    
-    await bot.editMessageText(`📝 Запрошен код для заказа #${orderId}\n\nПользователю отправлен запрос на ввод кода.`, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-  } catch (error) {
-    console.error('Ошибка обработки запроса кода:', error);
-  }
-}
-
 // Обработка готовности заказа
 async function handleOrderReady(orderId, msg) {
   try {
@@ -1021,7 +1022,7 @@ async function handleWrongCode(orderId, msg) {
   try {
     // Увеличиваем счетчик неверных попыток
     await pool.query(
-      "UPDATE orders SET wrong_code_attempts = wrong_code_attempts + 1, code = NULL, status = 'new' WHERE order_id = $1",
+      "UPDATE orders SET wrong_code_attempts = wrong_code_attempts + 1, code = NULL, status = 'waiting' WHERE order_id = $1",
       [orderId]
     );
     
@@ -1055,6 +1056,7 @@ function getStatusText(status) {
     'new': '🆕 Новый',
     'pending': '⏳ Ожидает оплаты',
     'confirmed': '✅ Оплачен',
+    'waiting_code_request': '⏳ Ожидает запроса кода',
     'waiting': '⏳ Ожидает выполнения',
     'completed': '🎉 Завершен',
     'canceled': '❌ Отменен'
@@ -1128,7 +1130,7 @@ app.post('/api/save-email', async (req, res) => {
     
     await pool.query(
       'UPDATE orders SET email = $1, status = $2 WHERE order_id = $3',
-      [email, 'confirmed', orderId]
+      [email, 'waiting_code_request', orderId]
     );
     
     // Отправляем уведомление админу
@@ -1148,7 +1150,34 @@ app.post('/api/save-email', async (req, res) => {
   }
 });
 
-// 3. Проверка кода
+// 3. Проверка запроса кода от админа
+app.get('/api/check-code-request/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    
+    const result = await pool.query(
+      'SELECT code_requested, status FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+    
+    const order = result.rows[0];
+    
+    res.json({
+      success: true,
+      codeRequested: order.code_requested || false,
+      status: order.status
+    });
+  } catch (error) {
+    console.error('Ошибка проверки запроса кода:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// 4. Проверка кода
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
@@ -1219,7 +1248,7 @@ app.post('/api/verify-code', async (req, res) => {
   }
 });
 
-// 4. Вебхук от Bilee Pay
+// 5. Вебхук от Bilee Pay
 app.post('/api/bilee-webhook', async (req, res) => {
   try {
     const clientIp = req.ip || req.connection.remoteAddress;
@@ -1264,7 +1293,7 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// 5. Проверка статуса заказа
+// 6. Проверка статуса заказа
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1304,7 +1333,7 @@ app.get('/api/order-status/:orderId', async (req, res) => {
   }
 });
 
-// 6. Получение списка товаров
+// 7. Получение списка товаров
 app.get('/api/products', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM products ORDER BY price');
@@ -1339,7 +1368,7 @@ app.get('/check-db-structure', async (req, res) => {
   }
 });
 
-// 7. Добавление товара (для админки через бота)
+// 8. Добавление товара (для админки через бота)
 app.post('/api/products', async (req, res) => {
   try {
     const { id, name, price, image_url, is_gift } = req.body;
