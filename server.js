@@ -1518,4 +1518,8 @@ async function startServer() {
   }
 }
 
-startServer();
+// Запускаем сервер с обработкой ошибок
+startServer().catch(error => {
+  console.error('Не удалось запустить сервер:', error);
+  process.exit(1);
+});
