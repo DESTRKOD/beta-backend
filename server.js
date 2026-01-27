@@ -110,16 +110,227 @@ async function initDB() {
   }
 }
 
+// ===== УЛУЧШЕННАЯ KEEP-ALIVE СИСТЕМА ДЛЯ RENDER =====
+
+// 1. Health check эндпоинт
+app.get('/health', (req, res) => {
+  const stats = {
+    status: 'healthy',
+    service: 'duck-shop-server',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    config: {
+      shop_id: BILEE_SHOP_ID ? '✅ Настроен' : '❌ Нет',
+      bot_token: TELEGRAM_BOT_TOKEN ? '✅ Есть' : '❌ Нет',
+      admin_id: ADMIN_ID ? '✅ ' + ADMIN_ID : '❌ Нет',
+      database: '✅ PostgreSQL'
+    }
+  };
+  
+  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check from ${req.ip}`);
+  res.json(stats);
+});
+
+// 2. Wakeup эндпоинт
+app.get('/wakeup', (req, res) => {
+  console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом от ${req.ip}`);
+  res.json({ 
+    status: 'awake', 
+    time: new Date().toISOString(),
+    uptime: process.uptime(),
+    message: 'Сервер активен и готов к работе'
+  });
+});
+
+// 3. Ping эндпоинт (для самопинга)
+app.get('/ping', (req, res) => {
+  console.log(`🏓 [${new Date().toLocaleTimeString('ru-RU')}] Ping received from ${req.ip}`);
+  res.send('pong');
+});
+
+// 4. Status эндпоинт
+app.get('/status', (req, res) => {
+  res.json({
+    alive: true,
+    timestamp: Date.now(),
+    serverTime: new Date().toISOString(),
+    renderKeepAlive: "active"
+  });
+});
+
+// 5. Мониторинг эндпоинт
+app.get('/monitor', (req, res) => {
+  res.json({
+    status: 'ok',
+    lastPing: new Date().toISOString(),
+    intervals: {
+      keepAlive: '4-6 минут',
+      monitoring: '1 час'
+    },
+    endpoints: {
+      health: `${SERVER_URL}/health`,
+      ping: `${SERVER_URL}/ping`,
+      wakeup: `${SERVER_URL}/wakeup`,
+      status: `${SERVER_URL}/status`
+    }
+  });
+});
+
+// 6. Keep-alive механизм
+let keepAliveInterval;
+
+async function pingSelf() {
+  try {
+    const https = require('https');
+    
+    const options = {
+      hostname: new URL(SERVER_URL).hostname,
+      port: 443,
+      path: '/ping',
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Render-KeepAlive/1.0',
+        'X-Internal-Ping': 'true'
+      },
+      timeout: 8000
+    };
+    
+    const req = https.request(options, (res) => {
+      const now = new Date().toLocaleTimeString('ru-RU');
+      console.log(`✅ [${now}] Self-ping successful (${res.statusCode})`);
+    });
+    
+    req.on('error', (err) => {
+      const now = new Date().toLocaleTimeString('ru-RU');
+      console.log(`⚠️ [${now}] Self-ping error: ${err.message}`);
+    });
+    
+    req.on('timeout', () => {
+      const now = new Date().toLocaleTimeString('ru-RU');
+      console.log(`⏰ [${now}] Self-ping timeout`);
+      req.destroy();
+    });
+    
+    req.end();
+    
+  } catch (error) {
+    const now = new Date().toLocaleTimeString('ru-RU');
+    console.log(`❌ [${now}] Self-ping exception: ${error.message}`);
+  }
+}
+
+function startKeepAlive() {
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+  }
+  
+  // Пингуем каждые 4-6 минут (рандомизация для надежности)
+  const interval = 4 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000);
+  
+  keepAliveInterval = setInterval(pingSelf, interval);
+  
+  // Пингуем сразу при старте
+  setTimeout(pingSelf, 3000);
+  
+  console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
+  
+  return interval;
+}
+
+// 7. Внешний мониторинг
+let externalMonitorInterval;
+
+async function checkExternalServices() {
+  const services = [
+    'https://httpstat.us/200',
+    'https://google.com',
+    'https://github.com'
+  ];
+  
+  for (const service of services) {
+    try {
+      const https = require('https');
+      
+      const url = new URL(service);
+      const options = {
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname || '/',
+        method: 'HEAD',
+        timeout: 5000
+      };
+      
+      const req = https.request(options, (res) => {
+        const now = new Date().toLocaleTimeString('ru-RU');
+        console.log(`🌐 [${now}] External service ${url.hostname} is reachable`);
+      });
+      
+      req.on('error', () => {
+        // Игнорируем ошибки внешних сервисов
+      });
+      
+      req.end();
+      
+    } catch (error) {
+      // Игнорируем ошибки
+    }
+  }
+}
+
+function startExternalMonitoring() {
+  if (externalMonitorInterval) {
+    clearInterval(externalMonitorInterval);
+  }
+  
+  // Проверяем внешние сервисы раз в час
+  externalMonitorInterval = setInterval(checkExternalServices, 60 * 60 * 1000);
+  
+  // Первая проверка через 30 секунд
+  setTimeout(checkExternalServices, 30000);
+  
+  console.log('📡 External monitoring started (every hour)');
+}
+
+// 8. Graceful shutdown
+function gracefulShutdown() {
+  console.log('🛑 Остановка keep-alive системы...');
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+  if (externalMonitorInterval) {
+    clearInterval(externalMonitorInterval);
+    externalMonitorInterval = null;
+  }
+  console.log('✅ Keep-alive система остановлена');
+}
+
+process.on('SIGTERM', () => {
+  console.log('🛑 Получен SIGTERM, завершаем работу...');
+  gracefulShutdown();
+  setTimeout(() => {
+    console.log('👋 Завершение работы сервера');
+    process.exit(0);
+  }, 1000);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 Получен SIGINT, завершаем работу...');
+  gracefulShutdown();
+  setTimeout(() => {
+    console.log('👋 Завершение работы сервера');
+    process.exit(0);
+  }, 1000);
+});
+
 // ===== TELEGRAM БОТ =====
 // Проверка, что сообщение от админа
 function isAdmin(msg) {
   return msg.from.id === ADMIN_ID;
 }
 
-
-
-
-// ===== КОМАНДА /add_product =====
+// Команда /add_product
 const productWizards = {}; // Храним состояния пользователей
 
 bot.onText(/\/add_product/, async (msg) => {
@@ -282,7 +493,6 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-
 // Команда /delete_product
 bot.onText(/\/delete_product/, async (msg) => {
   if (!isAdmin(msg)) {
@@ -319,50 +529,6 @@ bot.onText(/\/delete_product/, async (msg) => {
   }
 });
 
-// Обработка нажатия на товар для удаления
-bot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
-  
-  if (!isAdmin(callbackQuery)) {
-    bot.answerCallbackQuery(callbackQuery.id, { text: '⛔ Доступ запрещен' });
-    return;
-  }
-
-  if (data.startsWith('delete_product:')) {
-    const productId = data.split(':')[1];
-    
-    try {
-      // Получаем информацию о товаре перед удалением
-      const productResult = await pool.query(
-        'SELECT name FROM products WHERE id = $1',
-        [productId]
-      );
-      
-      if (productResult.rows.length === 0) {
-        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Товар не найден' });
-        return;
-      }
-      
-      const productName = productResult.rows[0].name;
-      
-      // Удаляем товар
-      await pool.query('DELETE FROM products WHERE id = $1', [productId]);
-      
-      // Обновляем сообщение
-      await bot.editMessageText(`✅ Товар "${productName}" удален`, {
-        chat_id: msg.chat.id,
-        message_id: msg.message_id
-      });
-      
-      bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар удален' });
-      
-    } catch (error) {
-      console.error('Ошибка удаления товара:', error);
-      bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка удаления' });
-    }
-  }
-});
 // Команда /products
 bot.onText(/\/products/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -402,7 +568,6 @@ bot.onText(/\/products/, async (msg) => {
   }
 });
 
-
 // Команда /start
 bot.onText(/\/start/, async (msg) => {
   if (!isAdmin(msg)) {
@@ -410,7 +575,7 @@ bot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\nДоступные команды:\n/orders - просмотреть заказы\n/stats - статистика`;
+  const welcomeText = `👋 Привет, администратор!\n\nДоступные команды:\n/orders - просмотреть заказы\n/stats - статистика\n/products - список товаров\n/add_product - добавить товар\n/delete_product - удалить товар`;
   bot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -466,7 +631,7 @@ bot.onText(/\/stats/, async (msg) => {
   }
 });
 
-// Обработчик callback-кнопок
+// Обработчик callback-кнопок для заказов
 bot.on('callback_query', async (callbackQuery) => {
   const msg = callbackQuery.message;
   const data = callbackQuery.data;
@@ -477,6 +642,36 @@ bot.on('callback_query', async (callbackQuery) => {
   }
   
   try {
+    // Обработка удаления товара
+    if (data.startsWith('delete_product:')) {
+      const productId = data.split(':')[1];
+      
+      const productResult = await pool.query(
+        'SELECT name FROM products WHERE id = $1',
+        [productId]
+      );
+      
+      if (productResult.rows.length === 0) {
+        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Товар не найден' });
+        return;
+      }
+      
+      const productName = productResult.rows[0].name;
+      
+      // Удаляем товар
+      await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+      
+      // Обновляем сообщение
+      await bot.editMessageText(`✅ Товар "${productName}" удален`, {
+        chat_id: msg.chat.id,
+        message_id: msg.message_id
+      });
+      
+      bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар удален' });
+      return;
+    }
+    
+    // Обработка заказов
     const [action, orderId] = data.split(':');
     
     switch(action) {
@@ -544,13 +739,10 @@ async function sendNewOrderNotification(orderId, total, email) {
   }
 }
 
-// Также обнови функцию sendCodeNotification:
+// Отправка уведомления о сохранении email и кода
 async function sendCodeNotification(orderId, total, email, code) {
   try {
-    const result = await pool.query(
-      'SELECT items FROM orders WHERE order_id = $1',
-      [orderId]
-    );
+    const result = await pool.query('SELECT items FROM orders WHERE order_id = $1', [orderId]);
     const items = result.rows[0]?.items || {};
     
     let itemsText = '';
@@ -593,38 +785,6 @@ async function sendCodeNotification(orderId, total, email, code) {
   }
 }
 
-// Отправка уведомления о сохранении email и кода
-async function sendCodeNotification(orderId, total, email, code) {
-  try {
-    const result = await pool.query('SELECT items FROM orders WHERE order_id = $1', [orderId]);
-    const items = result.rows[0]?.items || {};
-    
-    let itemsText = '';
-    for (const [id, qty] of Object.entries(items)) {
-      itemsText += `• Товар ${id}: ${qty} шт.\n`;
-    }
-    
-    const text = `📧 Новая информация по заказу #${orderId}\n\n` +
-      `Сумма: ${formatRub(total)}\n` +
-      `Почта: ${email}\n` +
-      `Код: ${code}\n\n` +
-      `Состав заказа:\n${itemsText}`;
-    
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '✅ Заказ готов', callback_data: `order_ready:${orderId}` },
-          { text: '❌ Неверный код', callback_data: `wrong_code:${orderId}` }
-        ]
-      ]
-    };
-    
-    await bot.sendMessage(ADMIN_ID, text, { reply_markup: keyboard });
-  } catch (error) {
-    console.error('Ошибка отправки уведомления о коде:', error);
-  }
-}
-
 // Обработка запроса кода
 async function handleRequestCode(orderId, msg) {
   try {
@@ -638,9 +798,6 @@ async function handleRequestCode(orderId, msg) {
       });
       return;
     }
-    
-    // Здесь можно отправить пользователю запрос на ввод кода
-    // В текущей реализации пользователь сам вводит код на сайте
     
     await bot.editMessageText(`📝 Запрошен код для заказа #${orderId}\n\nПользователю отправлен запрос на ввод кода.`, {
       chat_id: msg.chat.id,
@@ -664,7 +821,7 @@ async function handleOrderReady(orderId, msg) {
       message_id: msg.message_id
     });
   } catch (error) {
-    console.error('Ошибка обработки готовности заказа:', error);
+    console.error('Ошибка обработка готовности заказа:', error);
   }
 }
 
@@ -827,11 +984,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
   try {
     const clientIp = req.ip || req.connection.remoteAddress;
     
-    // Проверка IP (опционально)
-    // if (clientIp !== NOTIFICATION_IP) {
-    //   console.warn(`Подозрительный IP: ${clientIp}`);
-    // }
-    
     // Проверка подписи
     const isValid = await validateSignature(req.body, BILEE_PASSWORD);
     if (!isValid) {
@@ -872,16 +1024,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// API для фронтенда
-app.get('/api/products', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM products ORDER BY price');
-    res.json({ success: true, products: result.rows });
-  } catch (error) {
-    console.error('Ошибка получения товаров:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
 // 5. Проверка статуса заказа
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
@@ -908,14 +1050,14 @@ app.get('/api/order-status/:orderId', async (req, res) => {
   }
 });
 
-// 6. Получение списка товаров (для админки)
+// 6. Получение списка товаров
 app.get('/api/products', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM products ORDER BY price');
     res.json({ success: true, products: result.rows });
   } catch (error) {
     console.error('Ошибка получения товаров:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    res.status(500).json({ success: false, error: 'Database error' });
   }
 });
 
@@ -966,8 +1108,6 @@ app.post('/api/products', async (req, res) => {
   }
 });
 
-
-
 // ===== ЗАГРУЗКА ТЕСТОВЫХ ТОВАРОВ =====
 async function loadSampleProducts() {
   try {
@@ -1005,96 +1145,6 @@ async function loadSampleProducts() {
   }
 }
 
-
-// ===== KEEP-ALIVE СИСТЕМА ДЛЯ RENDER =====
-
-// 1. Health check эндпоинт (уже есть, но улучшаем)
-app.get('/health', (req, res) => {
-  const stats = {
-    status: 'healthy',
-    service: 'duck-shop-server',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    config: {
-      shop_id: BILEE_SHOP_ID ? '✅ Настроен' : '❌ Нет',
-      bot_token: TELEGRAM_BOT_TOKEN ? '✅ Есть' : '❌ Нет',
-      admin_id: ADMIN_ID ? '✅ ' + ADMIN_ID : '❌ Нет',
-      database: '✅ PostgreSQL'
-    }
-  };
-  
-  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check`);
-  res.json(stats);
-});
-
-// 2. Wakeup эндпоинт для внешних пингов
-app.get('/wakeup', (req, res) => {
-  console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом`);
-  res.json({ 
-    status: 'awake', 
-    time: new Date().toISOString(),
-    message: 'Сервер активен и готов к работе'
-  });
-});
-
-// 3. Внутренний self-ping (когда сервер жив)
-let selfPingInterval;
-
-function startSelfPing() {
-  if (selfPingInterval) clearInterval(selfPingInterval);
-  
-  selfPingInterval = setInterval(async () => {
-    try {
-      const http = require('http');
-      const url = require('url');
-      
-      const serverUrl = process.env.SERVER_URL || 'https://duck-shop-server.onrender.com';
-      const parsed = new url.URL(serverUrl);
-      
-      const options = {
-        hostname: parsed.hostname,
-        port: 443,
-        path: '/health',
-        method: 'GET',
-        timeout: 10000,
-        headers: { 'User-Agent': 'DuckShop-SelfPing/1.0' }
-      };
-      
-      const req = http.request(options, (res) => {
-        const now = new Date().toLocaleTimeString('ru-RU');
-        console.log(`❤️ [${now}] Self-ping: ${res.statusCode}`);
-      });
-      
-      req.on('error', () => { /* Игнорируем ошибки */ });
-      req.on('timeout', () => { /* Игнорируем таймауты */ });
-      
-      req.end();
-      
-    } catch (err) {
-      // Молчим об ошибках
-    }
-  }, 10 * 60 * 1000); // Каждые 10 минут (меньше 15!)
-  
-  console.log('🔄 Self-ping system started (every 10 minutes)');
-}
-
-// 4. Запускаем при старте сервера
-startSelfPing();
-
-// 5. Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 Получен SIGTERM, останавливаем сервер...');
-  if (selfPingInterval) clearInterval(selfPingInterval);
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 Получен SIGINT, останавливаем сервер...');
-  if (selfPingInterval) clearInterval(selfPingInterval);
-  process.exit(0);
-});
-
 // ===== ЗАПУСК СЕРВЕРА =====
 async function startServer() {
   try {
@@ -1110,6 +1160,11 @@ async function startServer() {
       console.log(`📞 API доступен по адресу: ${SERVER_URL}`);
       console.log(`🤖 Telegram бот запущен`);
       console.log(`👑 Админ ID: ${ADMIN_ID}`);
+      console.log(`⏰ Keep-alive система: АКТИВНА`);
+      
+      // Запуск keep-alive системы
+      startKeepAlive();
+      startExternalMonitoring();
     });
   } catch (error) {
     console.error('Ошибка запуска сервера:', error);
