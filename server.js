@@ -865,36 +865,37 @@ async function handleBackToOrders(msg) {
   }
 }
 
-// Запросить код от администратора
 async function handleRequestCode(orderId, msg) {
   try {
-    // Генерируем код
-    const code = generateCode();
-    
-    // Помечаем, что код запрошен и сохраняем код
+    // ПРОСТО ПОМЕЧАЕМ ЧТО КОД ЗАПРОШЕН, НЕ ГЕНЕРИРУЕМ КОД
     await pool.query(
-      "UPDATE orders SET code_requested = TRUE, code = $1, status = 'waiting_code_request' WHERE order_id = $2",
-      [code, orderId]
-    );
-    
-    // Получаем email заказа
-    const orderResult = await pool.query(
-      'SELECT email FROM orders WHERE order_id = $1',
+      "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
       [orderId]
     );
     
-    const email = orderResult.rows[0]?.email;
+    // Получаем информацию о заказе
+    const orderResult = await pool.query(
+      'SELECT email, total FROM orders WHERE order_id = $1',
+      [orderId]
+    );
     
-    await bot.editMessageText(`📝 *Код запрошен для заказа #${orderId}*\n\n🔢 *Код:* ${code}\n📧 *Email:* ${email || 'не указан'}\n\nКод отправлен пользователю для ввода.`, {
+    const order = orderResult.rows[0];
+    
+    const message = `📝 *Код запрошен для заказа #${orderId}*\n\n` +
+      `📧 *Email:* ${order?.email || 'не указан'}\n` +
+      `💰 *Сумма:* ${formatRub(order?.total || 0)}\n\n` +
+      `Пользователю открыт экран для ввода кода.`;
+    
+    await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       parse_mode: 'Markdown'
     });
+    
   } catch (error) {
     console.error('Ошибка запроса кода:', error);
   }
 }
-
 // Отметить заказ как готовый (из бота)
 async function handleMarkCompleted(orderId, msg) {
   try {
@@ -1180,7 +1181,6 @@ app.post('/api/save-email', async (req, res) => {
   }
 });
 
-// 3. Проверка запроса кода от админа
 app.get('/api/check-code-request/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1207,13 +1207,12 @@ app.get('/api/check-code-request/:orderId', async (req, res) => {
   }
 });
 
-// 4. Проверка кода
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
     
     const orderResult = await pool.query(
-      'SELECT email, total, wrong_code_attempts, code as saved_code FROM orders WHERE order_id = $1',
+      'SELECT email, total, wrong_code_attempts FROM orders WHERE order_id = $1',
       [orderId]
     );
     
@@ -1232,6 +1231,44 @@ app.post('/api/verify-code', async (req, res) => {
         message: 'Превышено количество попыток ввода кода'
       });
     }
+    
+    // ПРОСТО СОХРАНЯЕМ КОД И МЕНЯЕМ СТАТУС НА ОЖИДАНИЕ
+    await pool.query(
+      'UPDATE orders SET code = $1, status = $2 WHERE order_id = $3',
+      [code, 'waiting', orderId]
+    );
+    
+    // Отправляем уведомление админу с введенным кодом
+    const text = `🔢 *Пользователь ввел код для заказа #${orderId}*\n\n` +
+      `💰 Сумма: ${formatRub(order.total)}\n` +
+      `📧 Почта: ${order.email || 'не указана'}\n` +
+      `🔢 Введенный код: ${code}\n\n` +
+      `Проверьте правильность кода и отметьте заказ готовым.`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Заказ готов', callback_data: `order_ready:${orderId}` },
+          { text: '❌ Неверный код', callback_data: `wrong_code:${orderId}` }
+        ]
+      ]
+    };
+    
+    await bot.sendMessage(ADMIN_ID, text, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+    res.json({ 
+      success: true, 
+      status: 'waiting'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки кода:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
     
     // Проверяем код в базе данных
     const savedCode = order.saved_code;
