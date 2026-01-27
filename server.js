@@ -768,11 +768,8 @@ async function showOrderDetails(chatId, messageId, orderId) {
     // Создаем клавиатуру в зависимости от статуса
     let keyboardRows = [];
     
-    // Кнопка "Сделать готовым" показывается только если:
-    // 1. Заказ оплачен (payment_status = 'confirmed') ИЛИ
-    // 2. Уже есть email (статус email_entered или waiting_code_request) ИЛИ
-    // 3. Статус waiting (ожидание выполнения)
-    if ((order.payment_status === 'confirmed' || order.email) && order.status !== 'completed') {
+    // Кнопка "Сделать готовым" показывается всегда, кроме статуса completed
+    if (order.status !== 'completed') {
       keyboardRows.push([
         { text: '✅ Сделать готовым', callback_data: `mark_completed:${orderId}` }
       ]);
@@ -782,12 +779,16 @@ async function showOrderDetails(chatId, messageId, orderId) {
     // 1. Есть email
     // 2. Код еще не запрошен (code_requested = false)
     // 3. Заказ не завершен
-    if (order.email && !order.code_requested && order.status !== 'completed') {
+    // 4. Нет кода
+    if (order.email && !order.code_requested && order.status !== 'completed' && !order.code) {
       keyboardRows.push([
         { text: '📝 Запросить код', callback_data: `request_code:${orderId}` }
       ]);
     }
     
+    // Кнопки для проверки кода показываются если:
+    // 1. Есть код
+    // 2. Статус waiting (ожидание проверки)
     if (order.code && order.status === 'waiting') {
       keyboardRows.push([
         { text: '✅ Подтвердить код', callback_data: `order_ready:${orderId}` },
@@ -867,15 +868,27 @@ async function handleBackToOrders(msg) {
 // Запросить код от администратора
 async function handleRequestCode(orderId, msg) {
   try {
-    // Помечаем, что код запрошен
+    // Генерируем код
+    const code = generateCode();
+    
+    // Помечаем, что код запрошен и сохраняем код
     await pool.query(
-      "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
+      "UPDATE orders SET code_requested = TRUE, code = $1, status = 'waiting_code_request' WHERE order_id = $2",
+      [code, orderId]
+    );
+    
+    // Получаем email заказа
+    const orderResult = await pool.query(
+      'SELECT email FROM orders WHERE order_id = $1',
       [orderId]
     );
     
-    await bot.editMessageText(`📝 Код запрошен для заказа #${orderId}\n\nПользователю отправлен запрос на ввод кода.`, {
+    const email = orderResult.rows[0]?.email;
+    
+    await bot.editMessageText(`📝 *Код запрошен для заказа #${orderId}*\n\n🔢 *Код:* ${code}\n📧 *Email:* ${email || 'не указан'}\n\nКод отправлен пользователю для ввода.`, {
       chat_id: msg.chat.id,
-      message_id: msg.message_id
+      message_id: msg.message_id,
+      parse_mode: 'Markdown'
     });
   } catch (error) {
     console.error('Ошибка запроса кода:', error);
@@ -891,9 +904,26 @@ async function handleMarkCompleted(orderId, msg) {
       [orderId]
     );
     
-    await bot.editMessageText(`✅ Заказ #${orderId} отмечен как готовый\n\nПользователь будет уведомлен о готовности заказа.`, {
+    // Если есть код, сохраняем его
+    const orderResult = await pool.query(
+      'SELECT code FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    const code = orderResult.rows[0]?.code;
+    
+    let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
+    
+    if (code) {
+      message += `🔢 *Код заказа:* ${code}\n`;
+    }
+    
+    message += `Пользователь будет уведомлен о готовности заказа.`;
+    
+    await bot.editMessageText(message, {
       chat_id: msg.chat.id,
-      message_id: msg.message_id
+      message_id: msg.message_id,
+      parse_mode: 'Markdown'
     });
     
   } catch (error) {
@@ -1088,7 +1118,7 @@ app.post('/api/create-order', async (req, res) => {
       description: `Заказ #${orderId}`,
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
-      success_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=success&order=${orderId}&direct_email=true`,
+      success_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=success&order=${orderId}`,
       fail_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 часа
     };
@@ -1183,7 +1213,7 @@ app.post('/api/verify-code', async (req, res) => {
     const { orderId, code } = req.body;
     
     const orderResult = await pool.query(
-      'SELECT email, total, wrong_code_attempts FROM orders WHERE order_id = $1',
+      'SELECT email, total, wrong_code_attempts, code as saved_code FROM orders WHERE order_id = $1',
       [orderId]
     );
     
@@ -1191,7 +1221,8 @@ app.post('/api/verify-code', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Order not found' });
     }
     
-    const wrongAttempts = orderResult.rows[0].wrong_code_attempts || 0;
+    const order = orderResult.rows[0];
+    const wrongAttempts = order.wrong_code_attempts || 0;
     
     // Проверяем, если было 2 или более неверных попыток
     if (wrongAttempts >= 2) {
@@ -1203,12 +1234,7 @@ app.post('/api/verify-code', async (req, res) => {
     }
     
     // Проверяем код в базе данных
-    const codeResult = await pool.query(
-      'SELECT code FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    const savedCode = codeResult.rows[0]?.code;
+    const savedCode = order.saved_code;
     
     if (savedCode && savedCode === code) {
       // Код верный - помечаем заказ как выполненный
@@ -1231,8 +1257,8 @@ app.post('/api/verify-code', async (req, res) => {
       // Отправляем уведомление админу
       await sendCodeNotification(
         orderId,
-        orderResult.rows[0].total,
-        orderResult.rows[0].email,
+        order.total,
+        order.email,
         code
       );
       
