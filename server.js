@@ -120,27 +120,7 @@ async function initDB() {
   }
 }
 
-    // Таблица товаров
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS products (
-        id VARCHAR(20) PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        price INTEGER NOT NULL,
-        image_url TEXT NOT NULL,
-        is_gift BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Создаем индекс для быстрого поиска
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
-
-    console.log('✅ База данных инициализирована');
-  } catch (error) {
-    console.error('❌ Ошибка инициализации БД:', error);
-  }
-}
+    
 
 // ===== УЛУЧШЕННАЯ KEEP-ALIVE СИСТЕМА ДЛЯ RENDER =====
 
