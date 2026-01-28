@@ -182,7 +182,7 @@ app.get('/monitor', (req, res) => {
 // 6. Keep-alive механизм
 let keepAliveInterval;
 
-async function pingSelf() {
+function pingSelf() {
   try {
     const https = require('https');
     
@@ -243,7 +243,7 @@ function startKeepAlive() {
 // 7. Внешний мониторинг
 let externalMonitorInterval;
 
-async function checkExternalServices() {
+function checkExternalServices() {
   const services = [
     'https://httpstat.us/200',
     'https://google.com',
@@ -698,23 +698,23 @@ bot.on('callback_query', async (callbackQuery) => {
     
     switch(action) {
       case 'request_code':
-        await handleRequestCode(orderId, msg);
+        await handleRequestCode(orderId, msg, callbackQuery.id);
         break;
       case 'order_ready':
-        await handleOrderReady(orderId, msg);
+        await handleOrderReady(orderId, msg, callbackQuery.id);
         break;
       case 'wrong_code':
-        await handleWrongCode(orderId, msg);
+        await handleWrongCode(orderId, msg, callbackQuery.id);
         break;
       case 'mark_completed':
-        await handleMarkCompleted(orderId, msg);
+        await handleMarkCompleted(orderId, msg, callbackQuery.id);
         break;
       case 'back_to_orders':
         await handleBackToOrders(msg);
+        bot.answerCallbackQuery(callbackQuery.id);
         break;
     }
     
-    bot.answerCallbackQuery(callbackQuery.id);
   } catch (error) {
     console.error('Ошибка обработки callback:', error);
     bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка' });
@@ -865,7 +865,8 @@ async function handleBackToOrders(msg) {
   }
 }
 
-async function handleRequestCode(orderId, msg) {
+// Запросить код у пользователя
+async function handleRequestCode(orderId, msg, callbackQueryId) {
   try {
     // ПРОСТО ПОМЕЧАЕМ ЧТО КОД ЗАПРОШЕН, НЕ ГЕНЕРИРУЕМ КОД
     await pool.query(
@@ -892,47 +893,61 @@ async function handleRequestCode(orderId, msg) {
       parse_mode: 'Markdown'
     });
     
+    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Код запрошен у пользователя' });
+    
   } catch (error) {
     console.error('Ошибка запроса кода:', error);
+    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка при запросе кода' });
   }
 }
+
 // Отметить заказ как готовый (из бота)
-async function handleMarkCompleted(orderId, msg) {
+async function handleMarkCompleted(orderId, msg, callbackQueryId) {
   try {
-    // Обновляем статус заказа
+    // Сначала проверяем статус заказа
+    const orderResult = await pool.query(
+      'SELECT status, email, code FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      bot.answerCallbackQuery(callbackQueryId, { text: '❌ Заказ не найден' });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    
+    // Обновляем статус заказа независимо от предыдущего состояния
     await pool.query(
       "UPDATE orders SET status = 'completed' WHERE order_id = $1",
       [orderId]
     );
     
-    // Если есть код, сохраняем его
-    const orderResult = await pool.query(
-      'SELECT code FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    const code = orderResult.rows[0]?.code;
-    
     let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
     
-    if (code) {
-      message += `🔢 *Код заказа:* ${code}\n`;
+    // Показываем информацию о заказе
+    if (order.email) {
+      message += `📧 *Email:* ${order.email}\n`;
     }
     
-    message += `Пользователь будет уведомлен о готовности заказа.`;
+    if (order.code) {
+      message += `🔢 *Код:* ${order.code}\n`;
+    }
     
+    message += `\nПользователь будет уведомлен о готовности заказа.`;
+    
+    // Обновляем сообщение
     await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       parse_mode: 'Markdown'
     });
     
+    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Заказ отмечен готовым' });
+    
   } catch (error) {
     console.error('Ошибка отметки заказа как готового:', error);
-    await bot.editMessageText('❌ Ошибка при обновлении статуса заказа', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
+    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
   }
 }
 
@@ -1032,7 +1047,7 @@ async function sendCodeNotification(orderId, total, email, code) {
 }
 
 // Обработка готовности заказа
-async function handleOrderReady(orderId, msg) {
+async function handleOrderReady(orderId, msg, callbackQueryId) {
   try {
     await pool.query(
       "UPDATE orders SET status = 'completed' WHERE order_id = $1",
@@ -1043,13 +1058,16 @@ async function handleOrderReady(orderId, msg) {
       chat_id: msg.chat.id,
       message_id: msg.message_id
     });
+    
+    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Заказ отмечен готовым' });
   } catch (error) {
     console.error('Ошибка обработка готовности заказа:', error);
+    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
   }
 }
 
 // Обработка неверного кода
-async function handleWrongCode(orderId, msg) {
+async function handleWrongCode(orderId, msg, callbackQueryId) {
   try {
     // Увеличиваем счетчик неверных попыток
     await pool.query(
@@ -1077,8 +1095,11 @@ async function handleWrongCode(orderId, msg) {
       chat_id: msg.chat.id,
       message_id: msg.message_id
     });
+    
+    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Код отмечен неверным' });
   } catch (error) {
     console.error('Ошибка обработки неверного кода:', error);
+    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
   }
 }
 
@@ -1181,6 +1202,7 @@ app.post('/api/save-email', async (req, res) => {
   }
 });
 
+// 3. Проверка запроса кода
 app.get('/api/check-code-request/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1207,6 +1229,7 @@ app.get('/api/check-code-request/:orderId', async (req, res) => {
   }
 });
 
+// 4. Проверка кода
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
@@ -1269,47 +1292,6 @@ app.post('/api/verify-code', async (req, res) => {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-    
-    // Проверяем код в базе данных
-    const savedCode = order.saved_code;
-    
-    if (savedCode && savedCode === code) {
-      // Код верный - помечаем заказ как выполненный
-      await pool.query(
-        "UPDATE orders SET status = 'completed' WHERE order_id = $1",
-        [orderId]
-      );
-      
-      res.json({ 
-        success: true, 
-        status: 'completed'
-      });
-    } else {
-      // Код неверный - сохраняем и увеличиваем счетчик попыток
-      await pool.query(
-        'UPDATE orders SET code = $1, wrong_code_attempts = wrong_code_attempts + 1, status = $2 WHERE order_id = $3',
-        [code, 'waiting', orderId]
-      );
-      
-      // Отправляем уведомление админу
-      await sendCodeNotification(
-        orderId,
-        order.total,
-        order.email,
-        code
-      );
-      
-      res.json({ 
-        success: true, 
-        status: 'waiting'
-      });
-    }
-    
-  } catch (error) {
-    console.error('Ошибка проверки кода:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
 
 // 5. Вебхук от Bilee Pay
 app.post('/api/bilee-webhook', async (req, res) => {
@@ -1362,7 +1344,7 @@ app.get('/api/order-status/:orderId', async (req, res) => {
     const { orderId } = req.params;
     
     const result = await pool.query(
-      'SELECT status, payment_status, code, wrong_code_attempts FROM orders WHERE order_id = $1',
+      'SELECT status, payment_status, code, wrong_code_attempts, email, code_requested FROM orders WHERE order_id = $1',
       [orderId]
     );
     
@@ -1376,10 +1358,12 @@ app.get('/api/order-status/:orderId', async (req, res) => {
     if (order.wrong_code_attempts >= 2) {
       return res.json({
         success: true,
-        status: 'support_needed',
+        status: order.status,
         paymentStatus: order.payment_status,
         hasCode: !!order.code,
-        wrongAttempts: order.wrong_code_attempts
+        wrongAttempts: order.wrong_code_attempts,
+        hasEmail: !!order.email,
+        codeRequested: order.code_requested
       });
     }
     
@@ -1388,7 +1372,9 @@ app.get('/api/order-status/:orderId', async (req, res) => {
       status: order.status,
       paymentStatus: order.payment_status,
       hasCode: !!order.code,
-      wrongAttempts: order.wrong_code_attempts
+      wrongAttempts: order.wrong_code_attempts,
+      hasEmail: !!order.email,
+      codeRequested: order.code_requested
     });
   } catch (error) {
     console.error('Ошибка проверки статуса:', error);
