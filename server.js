@@ -17,7 +17,7 @@ const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const NOTIFICATION_IP = '147.45.247.34';
-const SERVER_URL = process.env.SERVER_URL || `https://ваш-сервер.onrender.com`;
+const SERVER_URL = process.env.SERVER_URL || `https://duck-shop-sever.onrender.com`;
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
 app.use(cors());
@@ -116,15 +116,10 @@ async function initDB() {
     console.log('✅ База данных инициализирована');
   } catch (error) {
     console.error('❌ Ошибка инициализации БД:', error);
-    // Не выходим из приложения, продолжаем работу
   }
 }
 
-    
-
 // ===== УЛУЧШЕННАЯ KEEP-ALIVE СИСТЕМА ДЛЯ RENDER =====
-
-// 1. Health check эндпоинт
 app.get('/health', (req, res) => {
   console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check from ${req.ip}`);
   res.json({
@@ -135,7 +130,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 2. Wakeup эндпоинт
 app.get('/wakeup', (req, res) => {
   console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом от ${req.ip}`);
   res.json({ 
@@ -144,12 +138,10 @@ app.get('/wakeup', (req, res) => {
   });
 });
 
-// 3. Ping эндпоинт
 app.get('/ping', (req, res) => {
   res.send('pong');
 });
 
-// 4. Status эндпоинт
 app.get('/status', (req, res) => {
   res.json({
     alive: true,
@@ -313,6 +305,9 @@ bot.on('callback_query', async (callbackQuery) => {
       case 'back_to_orders':
         await handleBackToOrders(msg);
         await bot.answerCallbackQuery(callbackQuery.id);
+        break;
+      case 'force_complete':
+        await completeOrder(orderId, msg, callbackQuery.id);
         break;
       default:
         await bot.answerCallbackQuery(callbackQuery.id, { 
@@ -811,7 +806,7 @@ app.post('/api/create-order', async (req, res) => {
       description: `Заказ #${orderId}`,
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
-      success_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=success&order=${orderId}`,
+      success_url: `https://DESTRKOD.github.io/duck2/success.html?order=${orderId}`,
       fail_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     };
@@ -957,7 +952,7 @@ app.post('/api/verify-code', async (req, res) => {
   }
 });
 
-// 5. Вебхук от Bilee Pay
+// 5. Вебхук от Bilee Pay - УБРАЛИ СМЕНУ СТАТУСА НА 'completed'
 app.post('/api/bilee-webhook', async (req, res) => {
   try {
     const isValid = await validateSignature(req.body, BILEE_PASSWORD);
@@ -969,9 +964,10 @@ app.post('/api/bilee-webhook', async (req, res) => {
     const { order_id, status, id: paymentId } = req.body;
     
     if (status === 'confirmed') {
+      // ТОЛЬКО обновляем payment_status, НЕ меняем общий статус заказа
       await pool.query(
-        'UPDATE orders SET payment_status = $1, status = $2 WHERE order_id = $3',
-        ['confirmed', 'confirmed', order_id]
+        'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
+        ['confirmed', order_id]
       );
       
       const orderResult = await pool.query(
