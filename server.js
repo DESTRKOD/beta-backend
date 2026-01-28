@@ -63,10 +63,9 @@ function formatRub(n) {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
 }
 
-// ===== БАЗА ДАННЫХ =====
 async function initDB() {
   try {
-    // Таблица заказов
+    // Таблица заказов - СНАЧАЛА создаем базовую таблицу
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -75,8 +74,6 @@ async function initDB() {
         total INTEGER NOT NULL,
         email VARCHAR(100),
         code VARCHAR(6),
-        code_requested BOOLEAN DEFAULT FALSE,
-        wrong_code_attempts INTEGER DEFAULT 0,
         payment_id INTEGER,
         payment_status VARCHAR(20) DEFAULT 'pending',
         status VARCHAR(20) DEFAULT 'new',
@@ -84,6 +81,44 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // ДОБАВЛЯЕМ недостающие столбцы, если их нет
+    try {
+      await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS code_requested BOOLEAN DEFAULT FALSE');
+      console.log('✅ Столбец code_requested добавлен');
+    } catch (e) {
+      console.log('ℹ️ Столбец code_requested уже существует:', e.message);
+    }
+
+    try {
+      await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS wrong_code_attempts INTEGER DEFAULT 0');
+      console.log('✅ Столбец wrong_code_attempts добавлен');
+    } catch (e) {
+      console.log('ℹ️ Столбец wrong_code_attempts уже существует:', e.message);
+    }
+
+    // Таблица товаров
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS products (
+        id VARCHAR(20) PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        price INTEGER NOT NULL,
+        image_url TEXT NOT NULL,
+        is_gift BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Создаем индекс для быстрого поиска
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
+
+    console.log('✅ База данных инициализирована');
+  } catch (error) {
+    console.error('❌ Ошибка инициализации БД:', error);
+    // Не выходим из приложения, продолжаем работу
+  }
+}
 
     // Таблица товаров
     await pool.query(`
