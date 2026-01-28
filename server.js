@@ -58,11 +58,6 @@ async function validateSignature(body, password) {
   return validSignature === body.signature;
 }
 
-// Генерация случайного 6-значного кода
-function generateCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
 // Форматирование суммы
 function formatRub(n) {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
@@ -106,9 +101,9 @@ async function initDB() {
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
 
-    console.log('База данных инициализирована');
+    console.log('✅ База данных инициализирована');
   } catch (error) {
-    console.error('Ошибка инициализации БД:', error);
+    console.error('❌ Ошибка инициализации БД:', error);
   }
 }
 
@@ -116,22 +111,13 @@ async function initDB() {
 
 // 1. Health check эндпоинт
 app.get('/health', (req, res) => {
-  const stats = {
+  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check from ${req.ip}`);
+  res.json({
     status: 'healthy',
     service: 'duck-shop-server',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    config: {
-      shop_id: BILEE_SHOP_ID ? '✅ Настроен' : '❌ Нет',
-      bot_token: TELEGRAM_BOT_TOKEN ? '✅ Есть' : '❌ Нет',
-      admin_id: ADMIN_ID ? '✅ ' + ADMIN_ID : '❌ Нет',
-      database: '✅ PostgreSQL'
-    }
-  };
-  
-  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check from ${req.ip}`);
-  res.json(stats);
+    uptime: process.uptime()
+  });
 });
 
 // 2. Wakeup эндпоинт
@@ -139,15 +125,12 @@ app.get('/wakeup', (req, res) => {
   console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом от ${req.ip}`);
   res.json({ 
     status: 'awake', 
-    time: new Date().toISOString(),
-    uptime: process.uptime(),
-    message: 'Сервер активен и готов к работе'
+    time: new Date().toISOString()
   });
 });
 
-// 3. Ping эндпоинт (для самопинга)
+// 3. Ping эндпоинт
 app.get('/ping', (req, res) => {
-  console.log(`🏓 [${new Date().toLocaleTimeString('ru-RU')}] Ping received from ${req.ip}`);
   res.send('pong');
 });
 
@@ -156,30 +139,11 @@ app.get('/status', (req, res) => {
   res.json({
     alive: true,
     timestamp: Date.now(),
-    serverTime: new Date().toISOString(),
-    renderKeepAlive: "active"
+    serverTime: new Date().toISOString()
   });
 });
 
-// 5. Мониторинг эндпоинт
-app.get('/monitor', (req, res) => {
-  res.json({
-    status: 'ok',
-    lastPing: new Date().toISOString(),
-    intervals: {
-      keepAlive: '4-6 минут',
-      monitoring: '1 час'
-    },
-    endpoints: {
-      health: `${SERVER_URL}/health`,
-      ping: `${SERVER_URL}/ping`,
-      wakeup: `${SERVER_URL}/wakeup`,
-      status: `${SERVER_URL}/status`
-    }
-  });
-});
-
-// 6. Keep-alive механизм
+// Keep-alive механизм
 let keepAliveInterval;
 
 function pingSelf() {
@@ -191,393 +155,56 @@ function pingSelf() {
       port: 443,
       path: '/ping',
       method: 'GET',
-      headers: {
-        'User-Agent': 'Render-KeepAlive/1.0',
-        'X-Internal-Ping': 'true'
-      },
       timeout: 8000
     };
     
     const req = https.request(options, (res) => {
-      const now = new Date().toLocaleTimeString('ru-RU');
-      console.log(`✅ [${now}] Self-ping successful (${res.statusCode})`);
+      console.log(`✅ Self-ping successful (${res.statusCode})`);
     });
     
     req.on('error', (err) => {
-      const now = new Date().toLocaleTimeString('ru-RU');
-      console.log(`⚠️ [${now}] Self-ping error: ${err.message}`);
-    });
-    
-    req.on('timeout', () => {
-      const now = new Date().toLocaleTimeString('ru-RU');
-      console.log(`⏰ [${now}] Self-ping timeout`);
-      req.destroy();
+      console.log(`⚠️ Self-ping error: ${err.message}`);
     });
     
     req.end();
     
   } catch (error) {
-    const now = new Date().toLocaleTimeString('ru-RU');
-    console.log(`❌ [${now}] Self-ping exception: ${error.message}`);
+    console.log(`❌ Self-ping exception: ${error.message}`);
   }
 }
 
 function startKeepAlive() {
-  if (keepAliveInterval) {
-    clearInterval(keepAliveInterval);
-  }
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
   
-  // Пингуем каждые 4-6 минут (рандомизация для надежности)
   const interval = 4 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000);
-  
   keepAliveInterval = setInterval(pingSelf, interval);
   
-  // Пингуем сразу при старте
   setTimeout(pingSelf, 3000);
-  
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
-  
-  return interval;
-}
-
-// 7. Внешний мониторинг
-let externalMonitorInterval;
-
-function checkExternalServices() {
-  const services = [
-    'https://httpstat.us/200',
-    'https://google.com',
-    'https://github.com'
-  ];
-  
-  for (const service of services) {
-    try {
-      const https = require('https');
-      
-      const url = new URL(service);
-      const options = {
-        hostname: url.hostname,
-        port: 443,
-        path: url.pathname || '/',
-        method: 'HEAD',
-        timeout: 5000
-      };
-      
-      const req = https.request(options, (res) => {
-        const now = new Date().toLocaleTimeString('ru-RU');
-        console.log(`🌐 [${now}] External service ${url.hostname} is reachable`);
-      });
-      
-      req.on('error', () => {
-        // Игнорируем ошибки внешних сервисов
-      });
-      
-      req.end();
-      
-    } catch (error) {
-      // Игнорируем ошибки
-    }
-  }
-}
-
-function startExternalMonitoring() {
-  if (externalMonitorInterval) {
-    clearInterval(externalMonitorInterval);
-  }
-  
-  // Проверяем внешние сервисы раз в час
-  externalMonitorInterval = setInterval(checkExternalServices, 60 * 60 * 1000);
-  
-  // Первая проверка через 30 секунд
-  setTimeout(checkExternalServices, 30000);
-  
-  console.log('📡 External monitoring started (every hour)');
-}
-
-// 8. Graceful shutdown
-function gracefulShutdown() {
-  console.log('🛑 Остановка keep-alive системы...');
-  if (keepAliveInterval) {
-    clearInterval(keepAliveInterval);
-    keepAliveInterval = null;
-  }
-  if (externalMonitorInterval) {
-    clearInterval(externalMonitorInterval);
-    externalMonitorInterval = null;
-  }
-  console.log('✅ Keep-alive система остановлена');
 }
 
 process.on('SIGTERM', () => {
   console.log('🛑 Получен SIGTERM, завершаем работу...');
-  gracefulShutdown();
-  setTimeout(() => {
-    console.log('👋 Завершение работы сервера');
-    process.exit(0);
-  }, 1000);
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+  setTimeout(() => process.exit(0), 1000);
 });
 
 process.on('SIGINT', () => {
   console.log('🛑 Получен SIGINT, завершаем работу...');
-  gracefulShutdown();
-  setTimeout(() => {
-    console.log('👋 Завершение работы сервера');
-    process.exit(0);
-  }, 1000);
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+  setTimeout(() => process.exit(0), 1000);
 });
 
 // ===== TELEGRAM БОТ =====
-// Проверка, что сообщение от админа
 function isAdmin(msg) {
   return msg.from.id === ADMIN_ID;
 }
-
-// Команда /add_product
-const productWizards = {}; // Храним состояния пользователей
-
-bot.onText(/\/add_product/, async (msg) => {
-  if (!isAdmin(msg)) {
-    bot.sendMessage(msg.chat.id, '⛔ Команда только для администратора');
-    return;
-  }
-
-  const chatId = msg.chat.id;
-  
-  // Инициализируем визард
-  productWizards[chatId] = {
-    step: 1,
-    product: {}
-  };
-
-  bot.sendMessage(chatId, '🛍️ *Добавление нового товара*\n\nВведите название товара:', {
-    parse_mode: 'HTML'
-  });
-});
-
-// Обработка ответов
-bot.on('message', async (msg) => {
-  if (!isAdmin(msg)) return;
-  
-  const chatId = msg.chat.id;
-  const wizard = productWizards[chatId];
-  
-  if (!wizard || msg.text?.startsWith('/')) return;
-
-  try {
-    switch (wizard.step) {
-      case 1: // Название
-        wizard.product.name = msg.text;
-        wizard.step = 2;
-        bot.sendMessage(chatId, '💰 *Введите цену в рублях* (только цифры):', {
-          parse_mode: 'HTML'
-        });
-        break;
-
-      case 2: // Цена
-        const price = parseInt(msg.text);
-        if (isNaN(price) || price <= 0) {
-          bot.sendMessage(chatId, '❌ Неверная цена. Введите число больше 0:');
-          return;
-        }
-        wizard.product.price = price;
-        wizard.step = 3;
-        bot.sendMessage(chatId, '📸 *Отправьте ссылку на изображение*\n\nПример: https://i.imgur.com/xxx.png', {
-          parse_mode: 'HTML'
-        });
-        break;
-
-      case 3: // Фото
-        // Проверяем, что это URL
-        if (!msg.text.startsWith('http')) {
-          bot.sendMessage(chatId, '❌ Это не ссылка. Отправьте полный URL:');
-          return;
-        }
-        wizard.product.image_url = msg.text;
-        wizard.step = 4;
-        
-        const keyboard = {
-          inline_keyboard: [
-            [
-              { text: '🎁 Подарок', callback_data: 'gift_true' },
-              { text: '📦 Обычный', callback_data: 'gift_false' }
-            ]
-          ]
-        };
-        
-        bot.sendMessage(chatId, '🎁 *Это подарочный товар?*', {
-          parse_mode: 'Markdown',
-          reply_markup: keyboard
-        });
-        break;
-    }
-  } catch (error) {
-    console.error('Ошибка в визарде:', error);
-    bot.sendMessage(chatId, '❌ Ошибка. Начните заново: /add_product');
-    delete productWizards[chatId];
-  }
-});
-
-// Обработка кнопок подарка
-bot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
-  
-  if (!isAdmin(callbackQuery)) {
-    await bot.answerCallbackQuery(callbackQuery.id, { 
-      text: '⛔ Доступ запрещен',
-      show_alert: true 
-    });
-    return;
-  }
-
-  const chatId = msg.chat.id;
-  const wizard = productWizards[chatId];
-
-  if (!wizard || wizard.step !== 4) {
-    await bot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-
-  try {
-    // Определяем ID товара
-    const productId = 'prod_' + Date.now() + Math.random().toString(36).substr(2, 5);
-    
-    // Сохраняем тип товара
-    wizard.product.is_gift = data === 'gift_true';
-    wizard.product.id = productId;
-
-    // Сохраняем в базу данных
-    await pool.query(
-      `INSERT INTO products (id, name, price, image_url, is_gift) 
-       VALUES ($1, $2, $3, $4, $5) 
-       ON CONFLICT (id) DO UPDATE SET 
-         name = EXCLUDED.name,
-         price = EXCLUDED.price,
-         image_url = EXCLUDED.image_url,
-         is_gift = EXCLUDED.is_gift`,
-      [
-        wizard.product.id,
-        wizard.product.name,
-        wizard.product.price,
-        wizard.product.image_url,
-        wizard.product.is_gift
-      ]
-    );
-
-    // Формируем ответ
-    const productText = `
-✅ *Товар успешно добавлен!*
-
-*ID:* ${wizard.product.id}
-*Название:* ${wizard.product.name}
-*Цена:* ${wizard.product.price} ₽
-*Тип:* ${wizard.product.is_gift ? '🎁 Подарок' : '📦 Обычный'}
-*Изображение:* ${wizard.product.image_url}
-
-Товар появится на сайте после обновления страницы.
-    `;
-
-    // Удаляем клавиатуру и отправляем результат
-    await bot.editMessageReplyMarkup(
-      { inline_keyboard: [] },
-      { chat_id: chatId, message_id: msg.message_id }
-    );
-
-    bot.sendMessage(chatId, productText, { parse_mode: 'HTML' });
-
-    // Очищаем визард
-    delete productWizards[chatId];
-
-    await bot.answerCallbackQuery(callbackQuery.id, { 
-      text: '✅ Товар сохранен',
-      show_alert: false 
-    });
-
-  } catch (error) {
-    console.error('Ошибка сохранения товара:', error);
-    bot.sendMessage(chatId, '❌ Ошибка сохранения товара в базу данных');
-    await bot.answerCallbackQuery(callbackQuery.id, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-    delete productWizards[chatId];
-  }
-});
-
-// Команда /delete_product
-bot.onText(/\/delete_product/, async (msg) => {
-  if (!isAdmin(msg)) {
-    bot.sendMessage(msg.chat.id, '⛔ Команда только для администратора');
-    return;
-  }
-
-  try {
-    const result = await pool.query('SELECT id, name, price FROM products ORDER BY name');
-    
-    if (result.rows.length === 0) {
-      bot.sendMessage(msg.chat.id, '📭 В базе нет товаров для удаления');
-      return;
-    }
-
-    // Создаем клавиатуру с товарами
-    const keyboard = {
-      inline_keyboard: result.rows.map(product => [
-        {
-          text: `${product.name} (${product.price} ₽)`,
-          callback_data: `delete_product:${product.id}`
-        }
-      ])
-    };
-
-    bot.sendMessage(msg.chat.id, '🗑️ *Выберите товар для удаления:*', {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard
-    });
-
-  } catch (error) {
-    console.error('Ошибка получения товаров для удаления:', error);
-    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
-  }
-});
-
-// Команда /products
-bot.onText(/\/products/, async (msg) => {
-  if (!isAdmin(msg)) return;
-
-  try {
-    const result = await pool.query('SELECT * FROM products ORDER BY price');
-    
-    if (result.rows.length === 0) {
-      bot.sendMessage(msg.chat.id, '📭 В базе нет товаров');
-      return;
-    }
-
-    let productsText = '🛍️ *Список товаров:*\n\n';
-    
-    result.rows.forEach((product, index) => {
-      productsText += `${index + 1}. *${product.name}*\n`;
-      productsText += `   ID: ${product.id}\n`;
-      productsText += `   Цена: ${product.price} ₽\n`;
-      productsText += `   Тип: ${product.is_gift ? '🎁 Подарок' : '📦 Обычный'}\n`;
-      productsText += `   Изображение: ${product.image_url}\n\n`;
-    });
-
-    // Разбиваем на части если сообщение слишком длинное
-    const maxLength = 4000;
-    if (productsText.length > maxLength) {
-      const parts = productsText.match(new RegExp(`.{1,${maxLength}}`, 'g'));
-      for (const part of parts) {
-        await bot.sendMessage(msg.chat.id, part, { parse_mode: 'HTML' });
-      }
-    } else {
-      bot.sendMessage(msg.chat.id, productsText, { parse_mode: 'HTML' });
-    }
-
-  } catch (error) {
-    console.error('Ошибка получения товаров:', error);
-    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
-  }
-});
 
 // Команда /start
 bot.onText(/\/start/, async (msg) => {
@@ -604,7 +231,6 @@ bot.onText(/\/orders/, async (msg) => {
       return;
     }
     
-    // Создаем клавиатуру с заказами
     const keyboard = {
       inline_keyboard: result.rows.map(order => [
         {
@@ -622,35 +248,10 @@ bot.onText(/\/orders/, async (msg) => {
       ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
     });
     
-    bot.sendMessage(msg.chat.id, ordersText, {
-      reply_markup: keyboard
-    });
+    bot.sendMessage(msg.chat.id, ordersText, { reply_markup: keyboard });
   } catch (error) {
-    console.error('Ошибка получения заказов:', error);
+    console.error('❌ Ошибка получения заказов:', error);
     bot.sendMessage(msg.chat.id, '❌ Ошибка при получении заказов');
-  }
-});
-
-// Команда /stats
-bot.onText(/\/stats/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  
-  try {
-    const totalResult = await pool.query('SELECT COUNT(*) as count, SUM(total) as revenue FROM orders WHERE payment_status = $1', ['confirmed']);
-    const todayResult = await pool.query(
-      "SELECT COUNT(*) as count FROM orders WHERE DATE(created_at) = CURRENT_DATE AND payment_status = $1",
-      ['confirmed']
-    );
-    
-    const statsText = `📊 Статистика магазина:\n\n` +
-      `Всего заказов: ${totalResult.rows[0].count || 0}\n` +
-      `Общая выручка: ${formatRub(totalResult.rows[0].revenue || 0)}\n` +
-      `Заказов сегодня: ${todayResult.rows[0].count || 0}`;
-    
-    bot.sendMessage(msg.chat.id, statsText);
-  } catch (error) {
-    console.error('Ошибка получения статистики:', error);
-    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении статистики');
   }
 });
 
@@ -658,8 +259,6 @@ bot.onText(/\/stats/, async (msg) => {
 bot.on('callback_query', async (callbackQuery) => {
   const msg = callbackQuery.message;
   const data = callbackQuery.data;
-  
-  console.log(`📞 Получен callback_query: ${data} от ${msg.chat.id}`);
   
   if (!isAdmin(callbackQuery)) {
     await bot.answerCallbackQuery(callbackQuery.id, { 
@@ -670,49 +269,11 @@ bot.on('callback_query', async (callbackQuery) => {
   }
   
   try {
-    // Обработка удаления товара
-    if (data.startsWith('delete_product:')) {
-      const productId = data.split(':')[1];
-      
-      const productResult = await pool.query(
-        'SELECT name FROM products WHERE id = $1',
-        [productId]
-      );
-      
-      if (productResult.rows.length === 0) {
-        await bot.answerCallbackQuery(callbackQuery.id, { 
-          text: '❌ Товар не найден',
-          show_alert: true 
-        });
-        return;
-      }
-      
-      const productName = productResult.rows[0].name;
-      
-      // Удаляем товар
-      await pool.query('DELETE FROM products WHERE id = $1', [productId]);
-      
-      // Обновляем сообщение
-      await bot.editMessageText(`✅ Товар "${productName}" удален`, {
-        chat_id: msg.chat.id,
-        message_id: msg.message_id
-      });
-      
-      await bot.answerCallbackQuery(callbackQuery.id, { 
-        text: '✅ Товар удален',
-        show_alert: false 
-      });
-      return;
-    }
-    
     // Обработка деталей заказа
     if (data.startsWith('order_detail:')) {
       const orderId = data.split(':')[1];
       await showOrderDetails(msg.chat.id, msg.message_id, orderId);
-      await bot.answerCallbackQuery(callbackQuery.id, { 
-        text: '📋 Загружаем детали заказа...',
-        show_alert: false 
-      });
+      await bot.answerCallbackQuery(callbackQuery.id);
       return;
     }
     
@@ -736,10 +297,7 @@ bot.on('callback_query', async (callbackQuery) => {
         break;
       case 'back_to_orders':
         await handleBackToOrders(msg);
-        await bot.answerCallbackQuery(callbackQuery.id, { 
-          text: '⬅️ Возвращаемся к списку заказов',
-          show_alert: false 
-        });
+        await bot.answerCallbackQuery(callbackQuery.id);
         break;
       default:
         await bot.answerCallbackQuery(callbackQuery.id, { 
@@ -750,14 +308,10 @@ bot.on('callback_query', async (callbackQuery) => {
     
   } catch (error) {
     console.error('❌ Ошибка обработки callback:', error);
-    try {
-      await bot.answerCallbackQuery(callbackQuery.id, { 
-        text: '❌ Ошибка обработки запроса',
-        show_alert: true 
-      });
-    } catch (e) {
-      console.error('❌ Не удалось отправить ответ об ошибке:', e);
-    }
+    await bot.answerCallbackQuery(callbackQuery.id, { 
+      text: '❌ Ошибка обработки запроса',
+      show_alert: true 
+    });
   }
 });
 
@@ -876,7 +430,6 @@ async function handleBackToOrders(msg) {
       return;
     }
     
-    // Создаем клавиатуру с заказами
     const keyboard = {
       inline_keyboard: result.rows.map(order => [
         {
@@ -908,17 +461,13 @@ async function handleBackToOrders(msg) {
 // Запросить код у пользователя
 async function handleRequestCode(orderId, msg, callbackQueryId) {
   try {
-    console.log(`📝 Запрос кода для заказа ${orderId} от админа ${msg.chat.id}`);
+    console.log(`📝 Запрос кода для заказа ${orderId}`);
     
-    // ПРОСТО ПОМЕЧАЕМ ЧТО КОД ЗАПРОШЕН, НЕ ГЕНЕРИРУЕМ КОД
     await pool.query(
       "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
       [orderId]
     );
     
-    console.log(`✅ В базе данных обновлен заказ ${orderId}: code_requested = TRUE`);
-    
-    // Получаем информацию о заказе
     const orderResult = await pool.query(
       'SELECT email, total FROM orders WHERE order_id = $1',
       [orderId]
@@ -929,38 +478,25 @@ async function handleRequestCode(orderId, msg, callbackQueryId) {
     const message = `📝 *Код запрошен для заказа #${orderId}*\n\n` +
       `📧 *Email:* ${order?.email || 'не указан'}\n` +
       `💰 *Сумма:* ${formatRub(order?.total || 0)}\n\n` +
-      `✅ Пользователю открыт экран для ввода кода.\n` +
-      `🔢 Теперь пользователь может ввести код на сайте.`;
+      `✅ Пользователю открыт экран для ввода кода.`;
     
-    // Редактируем сообщение в боте
     await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       parse_mode: 'Markdown'
     });
     
-    console.log(`✅ Сообщение в Telegram обновлено для заказа ${orderId}`);
-    
-    // ОБЯЗАТЕЛЬНО отвечаем на callback_query, иначе Telegram будет показывать "загрузка..."
     await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Код запрошен у пользователя. Теперь он может ввести код на сайте.',
+      text: '✅ Код запрошен у пользователя',
       show_alert: false
     });
     
-    console.log(`✅ Ответ отправлен в Telegram для callback ${callbackQueryId}`);
-    
   } catch (error) {
     console.error('❌ Ошибка запроса кода:', error);
-    
-    // Даже при ошибке нужно ответить на callback_query
-    try {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Ошибка при запросе кода. Попробуйте еще раз.',
-        show_alert: true
-      });
-    } catch (e) {
-      console.error('❌ Не удалось отправить ответ об ошибке:', e);
-    }
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при запросе кода',
+      show_alert: true
+    });
   }
 }
 
@@ -969,7 +505,6 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
   try {
     console.log(`✅ Помечаем заказ ${orderId} как готовый`);
     
-    // Сначала проверяем статус заказа
     const orderResult = await pool.query(
       'SELECT status, email, code FROM orders WHERE order_id = $1',
       [orderId]
@@ -977,7 +512,7 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
     
     if (orderResult.rows.length === 0) {
       await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Заказ не найден в базе данных',
+        text: '❌ Заказ не найден',
         show_alert: true 
       });
       return;
@@ -985,17 +520,13 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
     
     const order = orderResult.rows[0];
     
-    // Обновляем статус заказа независимо от предыдущего состояния
     await pool.query(
       "UPDATE orders SET status = 'completed' WHERE order_id = $1",
       [orderId]
     );
     
-    console.log(`✅ Статус заказа ${orderId} изменен на 'completed'`);
-    
     let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
     
-    // Показываем информацию о заказе
     if (order.email) {
       message += `📧 *Email:* ${order.email}\n`;
     }
@@ -1006,31 +537,136 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
     
     message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
     
-    // Обновляем сообщение
     await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       parse_mode: 'Markdown'
     });
     
-    console.log(`✅ Сообщение в Telegram обновлено`);
-    
-    // ОБЯЗАТЕЛЬНО отвечаем на callback_query
     await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Заказ отмечен как готовый. Пользователь будет уведомлен.',
+      text: '✅ Заказ отмечен как готовый',
       show_alert: false
     });
     
   } catch (error) {
     console.error('❌ Ошибка отметки заказа как готового:', error);
-    try {
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при обновлении статуса заказа',
+      show_alert: true 
+    });
+  }
+}
+
+// Подтвердить код (заказ готов)
+async function handleOrderReady(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`✅ Подтверждаем код для заказа ${orderId}`);
+    
+    const orderResult = await pool.query(
+      'SELECT code, email, total FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
       await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Ошибка при обновлении статуса заказа',
+        text: '❌ Заказ не найден',
         show_alert: true 
       });
-    } catch (e) {
-      console.error('❌ Не удалось отправить ответ об ошибке:', e);
+      return;
     }
+    
+    const order = orderResult.rows[0];
+    
+    // Проверяем, есть ли код
+    if (!order.code) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Код не введен пользователем',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    await pool.query(
+      "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+      [orderId]
+    );
+    
+    const message = `✅ *Заказ #${orderId} завершен*\n\n` +
+      `💰 *Сумма:* ${formatRub(order.total)}\n` +
+      `📧 *Email:* ${order.email || 'не указан'}\n` +
+      `🔢 *Код:* ${order.code}\n\n` +
+      `✅ Заказ успешно обработан и завершен.`;
+    
+    await bot.editMessageText(message, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      parse_mode: 'Markdown'
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Заказ завершен',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка подтверждения кода:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+// Отметить код как неверный
+async function handleWrongCode(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`❌ Отмечаем код как неверный для заказа ${orderId}`);
+    
+    const orderResult = await pool.query(
+      'SELECT wrong_code_attempts FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Заказ не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const currentAttempts = orderResult.rows[0].wrong_code_attempts || 0;
+    const newAttempts = currentAttempts + 1;
+    
+    await pool.query(
+      "UPDATE orders SET wrong_code_attempts = $1, code = NULL, status = 'waiting' WHERE order_id = $2",
+      [newAttempts, orderId]
+    );
+    
+    let message = `❌ *Код для заказа #${orderId} отмечен как неверный*\n\n`;
+    message += `Неверных попыток: ${newAttempts}\n`;
+    message += `Пользователю отправлен запрос на повторный ввод кода.`;
+    
+    if (newAttempts >= 2) {
+      message += `\n\n⚠️ Пользователь будет перенаправлен в поддержку.`;
+    }
+    
+    await bot.editMessageText(message, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Код отмечен неверным',
+      show_alert: false 
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка отметки кода как неверного:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
   }
 }
 
@@ -1046,7 +682,6 @@ async function sendNewOrderNotification(orderId, total, email) {
     let itemsText = '';
     let totalItems = 0;
     
-    // Получаем названия товаров из базы
     for (const [id, qty] of Object.entries(items)) {
       const productResult = await pool.query(
         'SELECT name FROM products WHERE id = $1',
@@ -1080,124 +715,6 @@ async function sendNewOrderNotification(orderId, total, email) {
   }
 }
 
-// Отправка уведомления о сохранении email и кода
-async function sendCodeNotification(orderId, total, email, code) {
-  try {
-    const result = await pool.query('SELECT items FROM orders WHERE order_id = $1', [orderId]);
-    const items = result.rows[0]?.items || {};
-    
-    let itemsText = '';
-    let totalItems = 0;
-    
-    for (const [id, qty] of Object.entries(items)) {
-      const productResult = await pool.query(
-        'SELECT name FROM products WHERE id = $1',
-        [id]
-      );
-      
-      const productName = productResult.rows[0]?.name || `Товар ${id}`;
-      itemsText += `• ${productName}: ${qty} шт.\n`;
-      totalItems += parseInt(qty);
-    }
-    
-    const text = `📧 *Новая информация по заказу #${orderId}*\n\n` +
-      `💰 Сумма: ${formatRub(total)}\n` +
-      `📧 Почта: ${email}\n` +
-      `🔢 Код: ${code}\n` +
-      `📦 Товаров: ${totalItems} шт.\n\n` +
-      `📋 *Состав заказа:*\n${itemsText}`;
-    
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '✅ Заказ готов', callback_data: `order_ready:${orderId}` },
-          { text: '❌ Неверный код', callback_data: `wrong_code:${orderId}` }
-        ],
-        [
-          { text: '📋 Управление заказом', callback_data: `order_detail:${orderId}` }
-        ]
-      ]
-    };
-    
-    await bot.sendMessage(ADMIN_ID, text, { 
-      parse_mode: 'Markdown',
-      reply_markup: keyboard 
-    });
-    
-  } catch (error) {
-    console.error('Ошибка отправки уведомления о коде:', error);
-  }
-}
-
-// Обработка готовности заказа
-async function handleOrderReady(orderId, msg, callbackQueryId) {
-  try {
-    await pool.query(
-      "UPDATE orders SET status = 'completed' WHERE order_id = $1",
-      [orderId]
-    );
-    
-    await bot.editMessageText(`✅ Заказ #${orderId} отмечен как готовый`, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Заказ отмечен готовым',
-      show_alert: false 
-    });
-  } catch (error) {
-    console.error('Ошибка обработка готовности заказа:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  }
-}
-
-// Обработка неверного кода
-async function handleWrongCode(orderId, msg, callbackQueryId) {
-  try {
-    // Увеличиваем счетчик неверных попыток
-    await pool.query(
-      "UPDATE orders SET wrong_code_attempts = wrong_code_attempts + 1, code = NULL, status = 'waiting' WHERE order_id = $1",
-      [orderId]
-    );
-    
-    // Получаем количество попыток
-    const result = await pool.query(
-      'SELECT wrong_code_attempts FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    const attempts = result.rows[0]?.wrong_code_attempts || 0;
-    
-    let message = `❌ Код для заказа #${orderId} отмечен как неверный\n\n`;
-    message += `Неверных попыток: ${attempts}\n`;
-    message += `Пользователю отправлен запрос на повторный ввод кода.`;
-    
-    if (attempts >= 2) {
-      message += `\n\n⚠️ Пользователь будет перенаправлен в поддержку.`;
-    }
-    
-    await bot.editMessageText(message, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Код отмечен неверным',
-      show_alert: false 
-    });
-  } catch (error) {
-    console.error('Ошибка обработки неверного кода:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  }
-}
-
 function getStatusText(status) {
   const statusMap = {
     'new': '🆕 Новый',
@@ -1218,39 +735,33 @@ app.post('/api/create-order', async (req, res) => {
   try {
     const { items, total } = req.body;
     
-    // Генерация уникального ID заказа
     const orderId = 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
     
-    // Сохранение заказа в БД
     await pool.query(
       'INSERT INTO orders (order_id, items, total, status) VALUES ($1, $2, $3, $4)',
       [orderId, items, total, 'new']
     );
     
-    // Создание платежа в Bilee Pay
     const paymentData = {
       order_id: orderId,
-      method_slug: 'card', // или другой метод
+      method_slug: 'card',
       amount: total,
       description: `Заказ #${orderId}`,
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
       success_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=success&order=${orderId}`,
       fail_url: `https://DESTRKOD.github.io/duck2/beta-duck.html?payment=fail&order=${orderId}`,
-      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 часа
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     };
     
-    // Генерация подписи
     paymentData.signature = await generateSignature(paymentData, BILEE_PASSWORD);
     
-    // Отправка запроса к Bilee Pay
     const bileeResponse = await axios.post(
       `${BILEE_API_URL}/payment/init`,
       paymentData
     );
     
     if (bileeResponse.data.success) {
-      // Сохраняем ID платежа
       await pool.query(
         'UPDATE orders SET payment_id = $1 WHERE order_id = $2',
         [bileeResponse.data.payment.id, orderId]
@@ -1280,7 +791,6 @@ app.post('/api/save-email', async (req, res) => {
       [email, 'waiting_code_request', orderId]
     );
     
-    // Отправляем уведомление админу
     const orderResult = await pool.query(
       'SELECT total FROM orders WHERE order_id = $1',
       [orderId]
@@ -1341,7 +851,6 @@ app.post('/api/verify-code', async (req, res) => {
     const order = orderResult.rows[0];
     const wrongAttempts = order.wrong_code_attempts || 0;
     
-    // Проверяем, если было 2 или более неверных попыток
     if (wrongAttempts >= 2) {
       return res.json({ 
         success: false, 
@@ -1350,13 +859,11 @@ app.post('/api/verify-code', async (req, res) => {
       });
     }
     
-    // ПРОСТО СОХРАНЯЕМ КОД И МЕНЯЕМ СТАТУС НА ОЖИДАНИЕ
     await pool.query(
       'UPDATE orders SET code = $1, status = $2 WHERE order_id = $3',
       [code, 'waiting', orderId]
     );
     
-    // Отправляем уведомление админу с введенным кодом
     const text = `🔢 *Пользователь ввел код для заказа #${orderId}*\n\n` +
       `💰 Сумма: ${formatRub(order.total)}\n` +
       `📧 Почта: ${order.email || 'не указана'}\n` +
@@ -1391,9 +898,6 @@ app.post('/api/verify-code', async (req, res) => {
 // 5. Вебхук от Bilee Pay
 app.post('/api/bilee-webhook', async (req, res) => {
   try {
-    const clientIp = req.ip || req.connection.remoteAddress;
-    
-    // Проверка подписи
     const isValid = await validateSignature(req.body, BILEE_PASSWORD);
     if (!isValid) {
       console.error('Неверная подпись от Bilee Pay');
@@ -1402,14 +906,12 @@ app.post('/api/bilee-webhook', async (req, res) => {
     
     const { order_id, status, id: paymentId } = req.body;
     
-    // Обновляем статус платежа в БД
     if (status === 'confirmed') {
       await pool.query(
         'UPDATE orders SET payment_status = $1, status = $2 WHERE order_id = $3',
         ['confirmed', 'confirmed', order_id]
       );
       
-      // Можно отправить дополнительное уведомление админу
       const orderResult = await pool.query(
         'SELECT total, email FROM orders WHERE order_id = $1',
         [order_id]
@@ -1425,7 +927,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
       }
     }
     
-    // Всегда возвращаем 200 OK
     res.status(200).send('OK');
   } catch (error) {
     console.error('Ошибка обработки вебхука:', error);
@@ -1448,19 +949,6 @@ app.get('/api/order-status/:orderId', async (req, res) => {
     }
     
     const order = result.rows[0];
-    
-    // Проверяем количество неверных попыток
-    if (order.wrong_code_attempts >= 2) {
-      return res.json({
-        success: true,
-        status: order.status,
-        paymentStatus: order.payment_status,
-        hasCode: !!order.code,
-        wrongAttempts: order.wrong_code_attempts,
-        hasEmail: !!order.email,
-        codeRequested: order.code_requested
-      });
-    }
     
     res.json({
       success: true,
@@ -1485,53 +973,6 @@ app.get('/api/products', async (req, res) => {
   } catch (error) {
     console.error('Ошибка получения товаров:', error);
     res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
-
-// Эндпоинт проверки структуры БД
-app.get('/check-db-structure', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        table_name,
-        column_name,
-        data_type,
-        character_maximum_length
-      FROM information_schema.columns
-      WHERE table_name IN ('products', 'orders')
-      ORDER BY table_name, ordinal_position
-    `);
-    
-    res.json({
-      success: true,
-      tables: result.rows,
-      message: 'Проверь что products.id имеет character_maximum_length: 100'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 8. Добавление товара (для админки через бота)
-app.post('/api/products', async (req, res) => {
-  try {
-    const { id, name, price, image_url, is_gift } = req.body;
-    
-    await pool.query(
-      `INSERT INTO products (id, name, price, image_url, is_gift) 
-       VALUES ($1, $2, $3, $4, $5) 
-       ON CONFLICT (id) DO UPDATE SET 
-         name = EXCLUDED.name,
-         price = EXCLUDED.price,
-         image_url = EXCLUDED.image_url,
-         is_gift = EXCLUDED.is_gift`,
-      [id, name, price, image_url, is_gift || false]
-    );
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Ошибка добавления товара:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
@@ -1566,40 +1007,32 @@ async function loadSampleProducts() {
       );
     }
     
-    console.log('Тестовые товары загружены');
+    console.log('✅ Тестовые товары загружены');
   } catch (error) {
-    console.error('Ошибка загрузки тестовых товаров:', error);
+    console.error('❌ Ошибка загрузки тестовых товаров:', error);
   }
 }
 
 // ===== ЗАПУСК СЕРВЕРА =====
 async function startServer() {
   try {
-    // Инициализация БД
     await initDB();
-    
-    // Загрузка тестовых товаров
     await loadSampleProducts();
     
-    // Запуск сервера
     app.listen(PORT, () => {
       console.log(`🚀 Сервер запущен на порту ${PORT}`);
       console.log(`📞 API доступен по адресу: ${SERVER_URL}`);
       console.log(`🤖 Telegram бот запущен`);
       console.log(`👑 Админ ID: ${ADMIN_ID}`);
-      console.log(`⏰ Keep-alive система: АКТИВНА`);
       
-      // Запуск keep-alive системы
       startKeepAlive();
-      startExternalMonitoring();
     });
   } catch (error) {
-    console.error('Ошибка запуска сервера:', error);
+    console.error('❌ Ошибка запуска сервера:', error);
     process.exit(1);
   }
 }
 
-// Запускаем сервер с обработкой ошибок
 startServer().catch(error => {
   console.error('Не удалось запустить сервер:', error);
   process.exit(1);
