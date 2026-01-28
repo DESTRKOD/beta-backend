@@ -423,7 +423,10 @@ bot.on('callback_query', async (callbackQuery) => {
   const data = callbackQuery.data;
   
   if (!isAdmin(callbackQuery)) {
-    bot.answerCallbackQuery(callbackQuery.id, { text: '⛔ Доступ запрещен' });
+    await bot.answerCallbackQuery(callbackQuery.id, { 
+      text: '⛔ Доступ запрещен',
+      show_alert: true 
+    });
     return;
   }
 
@@ -431,7 +434,7 @@ bot.on('callback_query', async (callbackQuery) => {
   const wizard = productWizards[chatId];
 
   if (!wizard || wizard.step !== 4) {
-    bot.answerCallbackQuery(callbackQuery.id);
+    await bot.answerCallbackQuery(callbackQuery.id);
     return;
   }
 
@@ -485,12 +488,18 @@ bot.on('callback_query', async (callbackQuery) => {
     // Очищаем визард
     delete productWizards[chatId];
 
-    bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар сохранен' });
+    await bot.answerCallbackQuery(callbackQuery.id, { 
+      text: '✅ Товар сохранен',
+      show_alert: false 
+    });
 
   } catch (error) {
     console.error('Ошибка сохранения товара:', error);
     bot.sendMessage(chatId, '❌ Ошибка сохранения товара в базу данных');
-    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка' });
+    await bot.answerCallbackQuery(callbackQuery.id, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
     delete productWizards[chatId];
   }
 });
@@ -645,13 +654,18 @@ bot.onText(/\/stats/, async (msg) => {
   }
 });
 
-// Обработчик callback-кнопок для заказов
+// Основной обработчик callback-кнопок
 bot.on('callback_query', async (callbackQuery) => {
   const msg = callbackQuery.message;
   const data = callbackQuery.data;
   
+  console.log(`📞 Получен callback_query: ${data} от ${msg.chat.id}`);
+  
   if (!isAdmin(callbackQuery)) {
-    bot.answerCallbackQuery(callbackQuery.id, { text: '⛔ Доступ запрещен' });
+    await bot.answerCallbackQuery(callbackQuery.id, { 
+      text: '⛔ Доступ запрещен',
+      show_alert: true 
+    });
     return;
   }
   
@@ -666,7 +680,10 @@ bot.on('callback_query', async (callbackQuery) => {
       );
       
       if (productResult.rows.length === 0) {
-        bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Товар не найден' });
+        await bot.answerCallbackQuery(callbackQuery.id, { 
+          text: '❌ Товар не найден',
+          show_alert: true 
+        });
         return;
       }
       
@@ -681,7 +698,10 @@ bot.on('callback_query', async (callbackQuery) => {
         message_id: msg.message_id
       });
       
-      bot.answerCallbackQuery(callbackQuery.id, { text: '✅ Товар удален' });
+      await bot.answerCallbackQuery(callbackQuery.id, { 
+        text: '✅ Товар удален',
+        show_alert: false 
+      });
       return;
     }
     
@@ -689,12 +709,17 @@ bot.on('callback_query', async (callbackQuery) => {
     if (data.startsWith('order_detail:')) {
       const orderId = data.split(':')[1];
       await showOrderDetails(msg.chat.id, msg.message_id, orderId);
-      bot.answerCallbackQuery(callbackQuery.id);
+      await bot.answerCallbackQuery(callbackQuery.id, { 
+        text: '📋 Загружаем детали заказа...',
+        show_alert: false 
+      });
       return;
     }
     
     // Обработка кнопок в деталях заказа
     const [action, orderId] = data.split(':');
+    
+    console.log(`🔘 Нажата кнопка: ${action} для заказа ${orderId}`);
     
     switch(action) {
       case 'request_code':
@@ -711,13 +736,28 @@ bot.on('callback_query', async (callbackQuery) => {
         break;
       case 'back_to_orders':
         await handleBackToOrders(msg);
-        bot.answerCallbackQuery(callbackQuery.id);
+        await bot.answerCallbackQuery(callbackQuery.id, { 
+          text: '⬅️ Возвращаемся к списку заказов',
+          show_alert: false 
+        });
         break;
+      default:
+        await bot.answerCallbackQuery(callbackQuery.id, { 
+          text: '⚠️ Неизвестная команда',
+          show_alert: true 
+        });
     }
     
   } catch (error) {
-    console.error('Ошибка обработки callback:', error);
-    bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Ошибка' });
+    console.error('❌ Ошибка обработки callback:', error);
+    try {
+      await bot.answerCallbackQuery(callbackQuery.id, { 
+        text: '❌ Ошибка обработки запроса',
+        show_alert: true 
+      });
+    } catch (e) {
+      console.error('❌ Не удалось отправить ответ об ошибке:', e);
+    }
   }
 });
 
@@ -868,11 +908,15 @@ async function handleBackToOrders(msg) {
 // Запросить код у пользователя
 async function handleRequestCode(orderId, msg, callbackQueryId) {
   try {
+    console.log(`📝 Запрос кода для заказа ${orderId} от админа ${msg.chat.id}`);
+    
     // ПРОСТО ПОМЕЧАЕМ ЧТО КОД ЗАПРОШЕН, НЕ ГЕНЕРИРУЕМ КОД
     await pool.query(
       "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
       [orderId]
     );
+    
+    console.log(`✅ В базе данных обновлен заказ ${orderId}: code_requested = TRUE`);
     
     // Получаем информацию о заказе
     const orderResult = await pool.query(
@@ -885,25 +929,46 @@ async function handleRequestCode(orderId, msg, callbackQueryId) {
     const message = `📝 *Код запрошен для заказа #${orderId}*\n\n` +
       `📧 *Email:* ${order?.email || 'не указан'}\n` +
       `💰 *Сумма:* ${formatRub(order?.total || 0)}\n\n` +
-      `Пользователю открыт экран для ввода кода.`;
+      `✅ Пользователю открыт экран для ввода кода.\n` +
+      `🔢 Теперь пользователь может ввести код на сайте.`;
     
+    // Редактируем сообщение в боте
     await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       parse_mode: 'Markdown'
     });
     
-    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Код запрошен у пользователя' });
+    console.log(`✅ Сообщение в Telegram обновлено для заказа ${orderId}`);
+    
+    // ОБЯЗАТЕЛЬНО отвечаем на callback_query, иначе Telegram будет показывать "загрузка..."
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Код запрошен у пользователя. Теперь он может ввести код на сайте.',
+      show_alert: false
+    });
+    
+    console.log(`✅ Ответ отправлен в Telegram для callback ${callbackQueryId}`);
     
   } catch (error) {
-    console.error('Ошибка запроса кода:', error);
-    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка при запросе кода' });
+    console.error('❌ Ошибка запроса кода:', error);
+    
+    // Даже при ошибке нужно ответить на callback_query
+    try {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Ошибка при запросе кода. Попробуйте еще раз.',
+        show_alert: true
+      });
+    } catch (e) {
+      console.error('❌ Не удалось отправить ответ об ошибке:', e);
+    }
   }
 }
 
 // Отметить заказ как готовый (из бота)
 async function handleMarkCompleted(orderId, msg, callbackQueryId) {
   try {
+    console.log(`✅ Помечаем заказ ${orderId} как готовый`);
+    
     // Сначала проверяем статус заказа
     const orderResult = await pool.query(
       'SELECT status, email, code FROM orders WHERE order_id = $1',
@@ -911,7 +976,10 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
     );
     
     if (orderResult.rows.length === 0) {
-      bot.answerCallbackQuery(callbackQueryId, { text: '❌ Заказ не найден' });
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Заказ не найден в базе данных',
+        show_alert: true 
+      });
       return;
     }
     
@@ -922,6 +990,8 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
       "UPDATE orders SET status = 'completed' WHERE order_id = $1",
       [orderId]
     );
+    
+    console.log(`✅ Статус заказа ${orderId} изменен на 'completed'`);
     
     let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
     
@@ -934,7 +1004,7 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
       message += `🔢 *Код:* ${order.code}\n`;
     }
     
-    message += `\nПользователь будет уведомлен о готовности заказа.`;
+    message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
     
     // Обновляем сообщение
     await bot.editMessageText(message, {
@@ -943,11 +1013,24 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
       parse_mode: 'Markdown'
     });
     
-    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Заказ отмечен готовым' });
+    console.log(`✅ Сообщение в Telegram обновлено`);
+    
+    // ОБЯЗАТЕЛЬНО отвечаем на callback_query
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Заказ отмечен как готовый. Пользователь будет уведомлен.',
+      show_alert: false
+    });
     
   } catch (error) {
-    console.error('Ошибка отметки заказа как готового:', error);
-    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
+    console.error('❌ Ошибка отметки заказа как готового:', error);
+    try {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Ошибка при обновлении статуса заказа',
+        show_alert: true 
+      });
+    } catch (e) {
+      console.error('❌ Не удалось отправить ответ об ошибке:', e);
+    }
   }
 }
 
@@ -1059,10 +1142,16 @@ async function handleOrderReady(orderId, msg, callbackQueryId) {
       message_id: msg.message_id
     });
     
-    bot.answerCallbackQuery(callbackQueryId, { text: '✅ Заказ отмечен готовым' });
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Заказ отмечен готовым',
+      show_alert: false 
+    });
   } catch (error) {
     console.error('Ошибка обработка готовности заказа:', error);
-    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
   }
 }
 
@@ -1096,10 +1185,16 @@ async function handleWrongCode(orderId, msg, callbackQueryId) {
       message_id: msg.message_id
     });
     
-    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Код отмечен неверным' });
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Код отмечен неверным',
+      show_alert: false 
+    });
   } catch (error) {
     console.error('Ошибка обработки неверного кода:', error);
-    bot.answerCallbackQuery(callbackQueryId, { text: '❌ Ошибка' });
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
   }
 }
 
