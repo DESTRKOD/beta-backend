@@ -500,13 +500,13 @@ async function handleRequestCode(orderId, msg, callbackQueryId) {
   }
 }
 
-// Отметить заказ как готовый (из бота)
 async function handleMarkCompleted(orderId, msg, callbackQueryId) {
   try {
     console.log(`✅ Помечаем заказ ${orderId} как готовый`);
     
+    // Сначала получаем текущие данные заказа
     const orderResult = await pool.query(
-      'SELECT status, email, code FROM orders WHERE order_id = $1',
+      'SELECT status, email, code, code_requested FROM orders WHERE order_id = $1',
       [orderId]
     );
     
@@ -520,33 +520,43 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
     
     const order = orderResult.rows[0];
     
-    await pool.query(
-      "UPDATE orders SET status = 'completed' WHERE order_id = $1",
-      [orderId]
-    );
-    
-    let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
-    
-    if (order.email) {
-      message += `📧 *Email:* ${order.email}\n`;
+    // Проверяем, можно ли пометить заказ готовым
+    if (order.status === 'completed') {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '⚠️ Заказ уже отмечен как готовый',
+        show_alert: true 
+      });
+      return;
     }
     
-    if (order.code) {
-      message += `🔢 *Код:* ${order.code}\n`;
+    // Если код запрошен, но не введен - предупреждаем
+    if (order.code_requested && !order.code) {
+      const confirmKeyboard = {
+        inline_keyboard: [[
+          { text: '✅ Да, все равно завершить', callback_data: `force_complete:${orderId}` },
+          { text: '❌ Отмена', callback_data: `order_detail:${orderId}` }
+        ]]
+      };
+      
+      await bot.editMessageText(
+        `⚠️ *Внимание!*\n\nКод был запрошен у пользователя, но он еще не ввел его.\n\nВы уверены, что хотите завершить заказ без кода?`,
+        {
+          chat_id: msg.chat.id,
+          message_id: msg.message_id,
+          parse_mode: 'Markdown',
+          reply_markup: confirmKeyboard
+        }
+      );
+      
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '⚠️ Требуется подтверждение',
+        show_alert: false 
+      });
+      return;
     }
     
-    message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
-    
-    await bot.editMessageText(message, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id,
-      parse_mode: 'Markdown'
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Заказ отмечен как готовый',
-      show_alert: false
-    });
+    // Обычное завершение заказа
+    await completeOrder(orderId, msg, callbackQueryId);
     
   } catch (error) {
     console.error('❌ Ошибка отметки заказа как готового:', error);
@@ -555,6 +565,43 @@ async function handleMarkCompleted(orderId, msg, callbackQueryId) {
       show_alert: true 
     });
   }
+}
+
+async function completeOrder(orderId, msg, callbackQueryId) {
+  await pool.query(
+    "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+    [orderId]
+  );
+  
+  const orderResult = await pool.query(
+    'SELECT email, code FROM orders WHERE order_id = $1',
+    [orderId]
+  );
+  
+  const order = orderResult.rows[0];
+  
+  let message = `✅ *Заказ #${orderId} отмечен как готовый*\n\n`;
+  
+  if (order.email) {
+    message += `📧 *Email:* ${order.email}\n`;
+  }
+  
+  if (order.code) {
+    message += `🔢 *Код:* ${order.code}\n`;
+  }
+  
+  message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
+  
+  await bot.editMessageText(message, {
+    chat_id: msg.chat.id,
+    message_id: msg.message_id,
+    parse_mode: 'Markdown'
+  });
+  
+  await bot.answerCallbackQuery(callbackQueryId, { 
+    text: '✅ Заказ отмечен как готовый',
+    show_alert: false
+  });
 }
 
 // Подтвердить код (заказ готов)
