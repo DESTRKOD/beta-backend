@@ -224,43 +224,238 @@ bot.onText(/\/start/, async (msg) => {
   bot.sendMessage(msg.chat.id, welcomeText);
 });
 
-// Команда /orders
-bot.onText(/\/orders/, async (msg) => {
+// Команда /stats
+bot.onText(/\/stats/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    // Общая статистика
+    const totalOrdersResult = await pool.query(
+      "SELECT COUNT(*) as total_orders, SUM(total) as total_revenue FROM orders WHERE payment_status = 'confirmed'"
+    );
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const todayOrdersResult = await pool.query(
+      "SELECT COUNT(*) as today_orders, SUM(total) as today_revenue FROM orders WHERE payment_status = 'confirmed' AND created_at >= $1",
+      [today]
+    );
+    
+    const statusStatsResult = await pool.query(
+      "SELECT status, COUNT(*) as count FROM orders GROUP BY status ORDER BY count DESC"
+    );
+    
+    const topProductsResult = await pool.query(`
+      SELECT 
+        p.name,
+        COUNT(o.id) as order_count,
+        SUM(o.total) as total_revenue
+      FROM orders o
+      JOIN LATERAL jsonb_each_text(o.items) AS item(id, quantity) ON true
+      JOIN products p ON item.id = p.id
+      WHERE o.payment_status = 'confirmed'
+      GROUP BY p.id, p.name
+      ORDER BY total_revenue DESC
+      LIMIT 5
+    `);
+    
+    const totalOrders = totalOrdersResult.rows[0]?.total_orders || 0;
+    const totalRevenue = totalOrdersResult.rows[0]?.total_revenue || 0;
+    const todayOrders = todayOrdersResult.rows[0]?.today_orders || 0;
+    const todayRevenue = todayOrdersResult.rows[0]?.today_revenue || 0;
+    
+    let statsText = `📊 *Статистика магазина*\n\n`;
+    statsText += `📦 Всего заказов: ${totalOrders}\n`;
+    statsText += `💰 Общая выручка: ${formatRub(totalRevenue)}\n\n`;
+    statsText += `📅 *За сегодня:*\n`;
+    statsText += `   Заказов: ${todayOrders}\n`;
+    statsText += `   Выручка: ${formatRub(todayRevenue)}\n\n`;
+    
+    statsText += `📈 *Статусы заказов:*\n`;
+    statusStatsResult.rows.forEach(row => {
+      const statusText = getStatusText(row.status);
+      statsText += `   ${statusText}: ${row.count}\n`;
+    });
+    
+    if (topProductsResult.rows.length > 0) {
+      statsText += `\n🏆 *Топ товаров по выручке:*\n`;
+      topProductsResult.rows.forEach((row, index) => {
+        statsText += `${index + 1}. ${row.name}\n`;
+        statsText += `   Заказов: ${row.order_count}\n`;
+        statsText += `   Выручка: ${formatRub(row.total_revenue)}\n`;
+      });
+    }
+    
+    await bot.sendMessage(msg.chat.id, statsText, { parse_mode: 'Markdown' });
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения статистики:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении статистики');
+  }
+});
+
+// Команда /products
+bot.onText(/\/products/, async (msg) => {
   if (!isAdmin(msg)) return;
   
   try {
     const result = await pool.query(
-      'SELECT order_id, total, status, created_at FROM orders ORDER BY created_at DESC LIMIT 10'
+      'SELECT id, name, price, is_gift FROM products ORDER BY price'
     );
     
     if (result.rows.length === 0) {
-      bot.sendMessage(msg.chat.id, '📭 Нет заказов');
+      bot.sendMessage(msg.chat.id, '📭 Нет товаров в базе данных');
+      return;
+    }
+    
+    let productsText = `📦 *Список товаров* (${result.rows.length} шт.)\n\n`;
+    
+    result.rows.forEach((product, index) => {
+      productsText += `${index + 1}. *${product.name}*\n`;
+      productsText += `   ID: ${product.id}\n`;
+      productsText += `   Цена: ${formatRub(product.price)}\n`;
+      productsText += `   Подарок: ${product.is_gift ? '✅ Да' : '❌ Нет'}\n\n`;
+    });
+    
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '➕ Добавить товар', callback_data: 'add_product_prompt' },
+          { text: '🗑️ Удалить товар', callback_data: 'delete_product_list' }
+        ]
+      ]
+    };
+    
+    bot.sendMessage(msg.chat.id, productsText, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения товаров:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
+  }
+});
+
+// Команда /add_product
+bot.onText(/\/add_product/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  const instructionText = `📝 *Добавление нового товара*\n\n` +
+    `Отправьте данные в формате:\n` +
+    `\`ID:название:цена:URL_картинки:подарок(0/1)\`\n\n` +
+    `*Пример:*\n` +
+    `\`c500:500 кристаллов:3500:https://example.com/img.png:0\`\n\n` +
+    `*Где:*\n` +
+    `• ID - уникальный идентификатор (латинские буквы и цифры)\n` +
+    `• название - название товара\n` +
+    `• цена - число в рублях\n` +
+    `• URL_картинки - полная ссылка на изображение\n` +
+    `• подарок - 1 если товар подарок, 0 если нет`;
+  
+  bot.sendMessage(msg.chat.id, instructionText, { parse_mode: 'Markdown' });
+});
+
+// Команда /delete_product
+bot.onText(/\/delete_product/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, name, price FROM products ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      bot.sendMessage(msg.chat.id, '📭 Нет товаров для удаления');
       return;
     }
     
     const keyboard = {
-      inline_keyboard: result.rows.map(order => [
-        {
-          text: `#${order.order_id} - ${formatRub(order.total)} - ${getStatusText(order.status)}`,
-          callback_data: `order_detail:${order.order_id}`
-        }
+      inline_keyboard: result.rows.map(product => [
+        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `delete_product:${product.id}` }
       ])
     };
     
-    let ordersText = '📋 Последние заказы:\n\n';
-    result.rows.forEach((order, index) => {
-      ordersText += `${index + 1}. Заказ #${order.order_id}\n`;
-      ordersText += `   Сумма: ${formatRub(order.total)}\n`;
-      ordersText += `   Статус: ${getStatusText(order.status)}\n`;
-      ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
-    });
+    bot.sendMessage(msg.chat.id, '🗑️ Выберите товар для удаления:', { reply_markup: keyboard });
     
-    bot.sendMessage(msg.chat.id, ordersText, { reply_markup: keyboard });
   } catch (error) {
-    console.error('❌ Ошибка получения заказов:', error);
-    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении заказов');
+    console.error('❌ Ошибка получения товаров:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
   }
 });
+
+// Обработка текстовых сообщений (для добавления товара)
+bot.on('message', async (msg) => {
+  if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
+  
+  // Проверяем, похоже ли сообщение на данные товара
+  const parts = msg.text.split(':');
+  if (parts.length >= 5) {
+    await handleAddProduct(msg);
+  }
+});
+
+async function handleAddProduct(msg) {
+  try {
+    const parts = msg.text.split(':');
+    if (parts.length < 5) {
+      bot.sendMessage(msg.chat.id, '❌ Неправильный формат. Используйте: ID:название:цена:URL:подарок(0/1)');
+      return;
+    }
+    
+    const [id, name, priceStr, image_url, isGiftStr] = parts;
+    const price = parseInt(priceStr);
+    const is_gift = isGiftStr === '1';
+    
+    if (!id || !name || !price || !image_url) {
+      bot.sendMessage(msg.chat.id, '❌ Все поля должны быть заполнены');
+      return;
+    }
+    
+    if (price < 10 || price > 10000) {
+      bot.sendMessage(msg.chat.id, '❌ Цена должна быть от 10 до 10000 рублей');
+      return;
+    }
+    
+    // Проверяем, существует ли уже товар с таким ID
+    const checkResult = await pool.query(
+      'SELECT id FROM products WHERE id = $1',
+      [id]
+    );
+    
+    if (checkResult.rows.length > 0) {
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '✅ Обновить существующий', callback_data: `update_product:${id}:${name}:${price}:${image_url}:${is_gift ? 1 : 0}` },
+            { text: '❌ Отмена', callback_data: 'cancel_add_product' }
+          ]
+        ]
+      };
+      
+      bot.sendMessage(msg.chat.id, `⚠️ Товар с ID "${id}" уже существует. Обновить?`, { reply_markup: keyboard });
+      return;
+    }
+    
+    await pool.query(
+      'INSERT INTO products (id, name, price, image_url, is_gift) VALUES ($1, $2, $3, $4, $5)',
+      [id, name, price, image_url, is_gift]
+    );
+    
+    const successText = `✅ Товар успешно добавлен!\n\n` +
+      `*ID:* ${id}\n` +
+      `*Название:* ${name}\n` +
+      `*Цена:* ${formatRub(price)}\n` +
+      `*Подарок:* ${is_gift ? '✅ Да' : '❌ Нет'}`;
+    
+    bot.sendMessage(msg.chat.id, successText, { parse_mode: 'Markdown' });
+    
+  } catch (error) {
+    console.error('❌ Ошибка добавления товара:', error);
+    bot.sendMessage(msg.chat.id, '❌ Ошибка при добавлении товара: ' + error.message);
+  }
+}
 
 // Основной обработчик callback-кнопок
 bot.on('callback_query', async (callbackQuery) => {
@@ -285,30 +480,55 @@ bot.on('callback_query', async (callbackQuery) => {
     }
     
     // Обработка кнопок в деталях заказа
-    const [action, orderId] = data.split(':');
-    
-    console.log(`🔘 Нажата кнопка: ${action} для заказа ${orderId}`);
+    const [action, ...params] = data.split(':');
     
     switch(action) {
       case 'request_code':
-        await handleRequestCode(orderId, msg, callbackQuery.id);
+        await handleRequestCode(params[0], msg, callbackQuery.id);
         break;
       case 'order_ready':
-        await handleOrderReady(orderId, msg, callbackQuery.id);
+        await handleOrderReady(params[0], msg, callbackQuery.id);
         break;
       case 'wrong_code':
-        await handleWrongCode(orderId, msg, callbackQuery.id);
+        await handleWrongCode(params[0], msg, callbackQuery.id);
         break;
       case 'mark_completed':
-        await handleMarkCompleted(orderId, msg, callbackQuery.id);
+        await handleMarkCompleted(params[0], msg, callbackQuery.id);
         break;
       case 'back_to_orders':
         await handleBackToOrders(msg);
         await bot.answerCallbackQuery(callbackQuery.id);
         break;
       case 'force_complete':
-        await completeOrder(orderId, msg, callbackQuery.id);
+        await completeOrder(params[0], msg, callbackQuery.id);
         break;
+      
+      // Обработка товаров
+      case 'add_product_prompt':
+        await bot.answerCallbackQuery(callbackQuery.id);
+        bot.sendMessage(msg.chat.id, '📝 Отправьте данные товара в формате:\nID:название:цена:URL:подарок(0/1)');
+        break;
+      
+      case 'delete_product_list':
+        await handleDeleteProductList(msg, callbackQuery.id);
+        break;
+      
+      case 'delete_product':
+        await handleDeleteProduct(params[0], msg, callbackQuery.id);
+        break;
+      
+      case 'update_product':
+        await handleUpdateProduct(params[0], params[1], params[2], params[3], params[4], msg, callbackQuery.id);
+        break;
+      
+      case 'cancel_add_product':
+        await bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
+        await bot.editMessageText('❌ Добавление товара отменено.', {
+          chat_id: msg.chat.id,
+          message_id: msg.message_id
+        });
+        break;
+      
       default:
         await bot.answerCallbackQuery(callbackQuery.id, { 
           text: '⚠️ Неизвестная команда',
@@ -722,6 +942,120 @@ async function handleWrongCode(orderId, msg, callbackQueryId) {
     console.error('❌ Ошибка отметки кода как неверного:', error);
     await bot.answerCallbackQuery(callbackQueryId, { 
       text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+// Управление товарами
+async function handleDeleteProductList(msg, callbackQueryId) {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, price FROM products ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { text: '📭 Нет товаров для удаления' });
+      return;
+    }
+    
+    const keyboard = {
+      inline_keyboard: result.rows.map(product => [
+        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `delete_product:${product.id}` }
+      ])
+    };
+    
+    await bot.editMessageText('🗑️ Выберите товар для удаления:', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: keyboard
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId);
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения списка товаров:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при получении списка товаров',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleDeleteProduct(productId, msg, callbackQueryId) {
+  try {
+    // Сначала получаем информацию о товаре
+    const productResult = await pool.query(
+      'SELECT name, price FROM products WHERE id = $1',
+      [productId]
+    );
+    
+    if (productResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Товар не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const product = productResult.rows[0];
+    
+    // Удаляем товар
+    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+    
+    const successText = `🗑️ Товар удален!\n\n` +
+      `*Название:* ${product.name}\n` +
+      `*Цена:* ${formatRub(product.price)}\n` +
+      `*ID:* ${productId}`;
+    
+    await bot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      parse_mode: 'Markdown'
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Товар удален',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка удаления товара:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при удалении товара',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleUpdateProduct(id, name, price, image_url, is_gift, msg, callbackQueryId) {
+  try {
+    await pool.query(
+      'UPDATE products SET name = $1, price = $2, image_url = $3, is_gift = $4 WHERE id = $5',
+      [name, price, image_url, is_gift === '1', id]
+    );
+    
+    const successText = `✅ Товар обновлен!\n\n` +
+      `*ID:* ${id}\n` +
+      `*Название:* ${name}\n` +
+      `*Цена:* ${formatRub(price)}\n` +
+      `*Подарок:* ${is_gift === '1' ? '✅ Да' : '❌ Нет'}`;
+    
+    await bot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      parse_mode: 'Markdown'
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Товар обновлен',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка обновления товара:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при обновлении товара',
       show_alert: true 
     });
   }
