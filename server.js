@@ -29,11 +29,10 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Telegram бот - ИСПОЛЬЗУЕМ WEBHOOK вместо polling для Render
+// Telegram бот
 let bot;
 try {
   if (process.env.NODE_ENV === 'production') {
-    // Для production используем polling с параметром
     bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { 
       polling: {
         timeout: 10,
@@ -42,7 +41,6 @@ try {
       }
     });
   } else {
-    // Для локальной разработки
     bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
   }
   console.log('🤖 Telegram бот инициализирован');
@@ -82,14 +80,12 @@ function formatRub(n) {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
 }
 
-// Функция для экранирования Markdown
-function escapeMarkdown(text) {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
-}
+// Глобальный объект для хранения состояний пользователей
+const userStates = {};
 
 async function initDB() {
   try {
-    // Таблица заказов - СНАЧАЛА создаем базовую таблицу
+    // Таблица заказов
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -124,7 +120,7 @@ async function initDB() {
     // Таблица товаров
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
-        id VARCHAR(20) PRIMARY KEY,
+        id VARCHAR(50) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         price INTEGER NOT NULL,
         image_url TEXT NOT NULL,
@@ -250,7 +246,16 @@ bot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\nДоступные команды:\n/orders - просмотреть заказы\n/stats - статистика\n/products - список товаров\n/add_product - добавить товар\n/delete_product - удалить товар`;
+  const welcomeText = `👋 Привет, администратор!\n\n` +
+    `📋 Доступные команды:\n` +
+    `/orders - просмотреть заказы\n` +
+    `/stats - статистика магазина\n` +
+    `/products - список товаров\n` +
+    `/add_product - добавить товар\n` +
+    `/delete_product - удалить товар\n` +
+    `/cancel - отменить текущее действие\n\n` +
+    `ℹ️ Для добавления товара используйте /add_product`;
+  
   bot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -331,7 +336,7 @@ bot.onText(/\/products/, async (msg) => {
   
   try {
     const result = await pool.query(
-      'SELECT id, name, price, is_gift FROM products ORDER BY price'
+      'SELECT id, name, price, is_gift FROM products ORDER BY created_at DESC'
     );
     
     if (result.rows.length === 0) {
@@ -342,10 +347,10 @@ bot.onText(/\/products/, async (msg) => {
     let productsText = `📦 Список товаров (${result.rows.length} шт.)\n\n`;
     
     result.rows.forEach((product, index) => {
-      productsText += `${index + 1}. ${product.name}\n`;
+      const giftEmoji = product.is_gift ? ' 🎁' : '';
+      productsText += `${index + 1}. ${product.name}${giftEmoji}\n`;
       productsText += `   ID: ${product.id}\n`;
-      productsText += `   Цена: ${formatRub(product.price)}\n`;
-      productsText += `   Подарок: ${product.is_gift ? '✅ Да' : '❌ Нет'}\n\n`;
+      productsText += `   Цена: ${formatRub(product.price)}\n\n`;
     });
     
     const keyboard = {
@@ -367,23 +372,19 @@ bot.onText(/\/products/, async (msg) => {
   }
 });
 
-// Команда /add_product
+// Команда /add_product - НОВАЯ СИСТЕМА
 bot.onText(/\/add_product/, async (msg) => {
   if (!isAdmin(msg)) return;
   
-  const instructionText = `📝 Добавление нового товара\n\n` +
-    `Отправьте данные в формате:\n` +
-    `ID:название:цена:URL_картинки:подарок(0/1)\n\n` +
-    `Пример:\n` +
-    `c500:500 кристаллов:3500:https://example.com/img.png:0\n\n` +
-    `Где:\n` +
-    `• ID - уникальный идентификатор (латинские буквы и цифры)\n` +
-    `• название - название товара\n` +
-    `• цена - число в рублях\n` +
-    `• URL_картинки - полная ссылка на изображение\n` +
-    `• подарок - 1 если товар подарок, 0 если нет`;
+  const chatId = msg.chat.id;
   
-  bot.sendMessage(msg.chat.id, instructionText);
+  // Инициализируем состояние для пользователя
+  userStates[chatId] = {
+    step: 'awaiting_name',
+    productData: {}
+  };
+  
+  bot.sendMessage(chatId, '📝 Давайте добавим новый товар.\n\nШаг 1/4: Введите название товара:');
 });
 
 // Команда /delete_product
@@ -452,75 +453,97 @@ bot.onText(/\/orders/, async (msg) => {
   }
 });
 
-// Обработка текстовых сообщений (для добавления товара)
-bot.on('message', async (msg) => {
-  if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
+// Команда /cancel
+bot.onText(/\/cancel/, async (msg) => {
+  if (!isAdmin(msg)) return;
   
-  // Проверяем, похоже ли сообщение на данные товара
-  const parts = msg.text.split(':');
-  if (parts.length >= 5) {
-    await handleAddProduct(msg);
+  const chatId = msg.chat.id;
+  if (userStates[chatId]) {
+    delete userStates[chatId];
+    bot.sendMessage(chatId, '❌ Текущее действие отменено.');
   }
 });
 
-async function handleAddProduct(msg) {
+// Обработка текстовых сообщений (для пошагового добавления товара)
+bot.on('message', async (msg) => {
+  if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
+  
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  // Проверяем, находится ли пользователь в процессе добавления товара
+  const userState = userStates[chatId];
+  
+  if (userState && userState.step) {
+    await handleAddProductStep(msg, userState);
+  }
+});
+
+async function handleAddProductStep(msg, userState) {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
   try {
-    const parts = msg.text.split(':');
-    if (parts.length < 5) {
-      bot.sendMessage(msg.chat.id, '❌ Неправильный формат. Используйте: ID:название:цена:URL:подарок(0/1)');
-      return;
+    switch(userState.step) {
+      case 'awaiting_name':
+        if (text.length < 2 || text.length > 100) {
+          bot.sendMessage(chatId, '❌ Название должно быть от 2 до 100 символов. Введите название еще раз:');
+          return;
+        }
+        
+        userState.productData.name = text;
+        userState.step = 'awaiting_price';
+        bot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/4: Введите цену товара (в рублях, только цифры):');
+        break;
+        
+      case 'awaiting_price':
+        const price = parseInt(text);
+        if (isNaN(price) || price < 10 || price > 10000) {
+          bot.sendMessage(chatId, '❌ Цена должна быть числом от 10 до 10000 рублей. Введите цену еще раз:');
+          return;
+        }
+        
+        userState.productData.price = price;
+        userState.step = 'awaiting_image';
+        bot.sendMessage(chatId, '✅ Цена сохранена.\n\nШаг 3/4: Введите URL изображения товара:');
+        break;
+        
+      case 'awaiting_image':
+        if (!text.startsWith('http://') && !text.startsWith('https://')) {
+          bot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://. Введите URL еще раз:');
+          return;
+        }
+        
+        userState.productData.image_url = text;
+        userState.step = 'awaiting_gift';
+        
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '✅ Да, это подарок', callback_data: 'set_gift:1' },
+                { text: '❌ Нет, обычный товар', callback_data: 'set_gift:0' }
+              ]
+            ]
+          }
+        };
+        
+        bot.sendMessage(chatId, '✅ URL изображения сохранен.\n\nШаг 4/4: Это подарочный товар?', keyboard);
+        break;
+        
+      case 'awaiting_gift':
+        // Этот случай обрабатывается через callback кнопки
+        bot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора типа товара.');
+        return;
     }
     
-    const [id, name, priceStr, image_url, isGiftStr] = parts;
-    const price = parseInt(priceStr);
-    const is_gift = isGiftStr === '1';
-    
-    if (!id || !name || !price || !image_url) {
-      bot.sendMessage(msg.chat.id, '❌ Все поля должны быть заполнены');
-      return;
-    }
-    
-    if (price < 10 || price > 10000) {
-      bot.sendMessage(msg.chat.id, '❌ Цена должна быть от 10 до 10000 рублей');
-      return;
-    }
-    
-    // Проверяем, существует ли уже товар с таким ID
-    const checkResult = await pool.query(
-      'SELECT id FROM products WHERE id = $1',
-      [id]
-    );
-    
-    if (checkResult.rows.length > 0) {
-      const keyboard = {
-        inline_keyboard: [
-          [
-            { text: '✅ Обновить существующий', callback_data: `update_product:${id}:${escapeMarkdown(name)}:${price}:${escapeMarkdown(image_url)}:${is_gift ? 1 : 0}` },
-            { text: '❌ Отмена', callback_data: 'cancel_add_product' }
-          ]
-        ]
-      };
-      
-      bot.sendMessage(msg.chat.id, `⚠️ Товар с ID "${id}" уже существует. Обновить?`, { reply_markup: keyboard });
-      return;
-    }
-    
-    await pool.query(
-      'INSERT INTO products (id, name, price, image_url, is_gift) VALUES ($1, $2, $3, $4, $5)',
-      [id, name, price, image_url, is_gift]
-    );
-    
-    const successText = `✅ Товар успешно добавлен!\n\n` +
-      `ID: ${id}\n` +
-      `Название: ${name}\n` +
-      `Цена: ${formatRub(price)}\n` +
-      `Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}`;
-    
-    bot.sendMessage(msg.chat.id, successText);
+    // Сохраняем обновленное состояние
+    userStates[chatId] = userState;
     
   } catch (error) {
-    console.error('❌ Ошибка добавления товара:', error);
-    bot.sendMessage(msg.chat.id, '❌ Ошибка при добавлении товара: ' + error.message);
+    console.error('❌ Ошибка обработки шага:', error);
+    bot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново командой /add_product');
+    delete userStates[chatId];
   }
 }
 
@@ -573,7 +596,7 @@ bot.on('callback_query', async (callbackQuery) => {
       // Обработка товаров
       case 'add_product_prompt':
         await bot.answerCallbackQuery(callbackQuery.id);
-        bot.sendMessage(msg.chat.id, '📝 Отправьте данные товара в формате:\nID:название:цена:URL:подарок(0/1)');
+        bot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
         break;
       
       case 'delete_product_list':
@@ -584,8 +607,8 @@ bot.on('callback_query', async (callbackQuery) => {
         await handleDeleteProduct(params[0], msg, callbackQuery.id);
         break;
       
-      case 'update_product':
-        await handleUpdateProduct(params[0], params[1], params[2], params[3], params[4], msg, callbackQuery.id);
+      case 'set_gift':
+        await handleSetGift(params[0], msg, callbackQuery.id);
         break;
       
       case 'cancel_add_product':
@@ -611,6 +634,71 @@ bot.on('callback_query', async (callbackQuery) => {
     });
   }
 });
+
+// Функция обработки выбора подарка
+async function handleSetGift(isGift, msg, callbackQueryId) {
+  const chatId = msg.chat.id;
+  const userState = userStates[chatId];
+  
+  if (!userState || userState.step !== 'awaiting_gift') {
+    await bot.answerCallbackQuery(callbackQueryId, { text: '❌ Сессия устарела. Начните заново командой /add_product' });
+    return;
+  }
+  
+  try {
+    const is_gift = isGift === '1';
+    userState.productData.is_gift = is_gift;
+    
+    // Генерируем уникальный ID
+    const timestamp = Date.now();
+    const randomString = Math.random().toString(36).substr(2, 8);
+    const id = `prod_${timestamp}${randomString}`;
+    
+    // Сохраняем товар в базу данных
+    const { name, price, image_url } = userState.productData;
+    
+    await pool.query(
+      'INSERT INTO products (id, name, price, image_url, is_gift) VALUES ($1, $2, $3, $4, $5)',
+      [id, name, price, image_url, is_gift]
+    );
+    
+    // Формируем сообщение об успехе
+    const successText = `🎉 Товар успешно добавлен!\n\n` +
+      `📝 Информация о товаре:\n` +
+      `🆔 ID: ${id}\n` +
+      `🏷️ Название: ${name}\n` +
+      `💰 Цена: ${formatRub(price)}\n` +
+      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+      `🖼️ Изображение: ${image_url.substring(0, 30)}...`;
+    
+    // Удаляем состояние пользователя
+    delete userStates[chatId];
+    
+    await bot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Товар добавлен!',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка сохранения товара:', error);
+    delete userStates[chatId];
+    
+    await bot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка сохранения',
+      show_alert: true
+    });
+  }
+}
 
 // Показать детали заказа
 async function showOrderDetails(chatId, messageId, orderId) {
@@ -1089,42 +1177,6 @@ async function handleDeleteProduct(productId, msg, callbackQueryId) {
   }
 }
 
-async function handleUpdateProduct(id, name, price, image_url, is_gift, msg, callbackQueryId) {
-  try {
-    // Декодируем параметры
-    const decodedName = decodeURIComponent(name);
-    const decodedImageUrl = decodeURIComponent(image_url);
-    
-    await pool.query(
-      'UPDATE products SET name = $1, price = $2, image_url = $3, is_gift = $4 WHERE id = $5',
-      [decodedName, price, decodedImageUrl, is_gift === '1', id]
-    );
-    
-    const successText = `✅ Товар обновлен!\n\n` +
-      `ID: ${id}\n` +
-      `Название: ${decodedName}\n` +
-      `Цена: ${formatRub(price)}\n` +
-      `Подарок: ${is_gift === '1' ? '✅ Да' : '❌ Нет'}`;
-    
-    await bot.editMessageText(successText, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Товар обновлен',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка обновления товара:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка при обновлении товара',
-      show_alert: true 
-    });
-  }
-}
-
 // Отправка уведомления о новом заказе
 async function sendNewOrderNotification(orderId, total, email) {
   try {
@@ -1348,7 +1400,7 @@ app.post('/api/verify-code', async (req, res) => {
   }
 });
 
-// 5. Вебхук от Bilee Pay - УБРАЛИ СМЕНУ СТАТУСА НА 'completed'
+// 5. Вебхук от Bilee Pay
 app.post('/api/bilee-webhook', async (req, res) => {
   try {
     const isValid = await validateSignature(req.body, BILEE_PASSWORD);
@@ -1360,7 +1412,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
     const { order_id, status, id: paymentId } = req.body;
     
     if (status === 'confirmed') {
-      // ТОЛЬКО обновляем payment_status, НЕ меняем общий статус заказа
       await pool.query(
         'UPDATE orders SET payment_status = $1 WHERE order_id = $2',
         ['confirmed', order_id]
