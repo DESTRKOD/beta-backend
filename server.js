@@ -16,6 +16,7 @@ const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const USER_BOT_TOKEN = process.env.USER_BOT_TOKEN;
+const USER_BOT_USERNAME = process.env.USER_BOT_USERNAME;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL || `https://duck-shop-sever.onrender.com`;
 const SITE_URL = process.env.SITE_URL || 'https://DESTRKOD.github.io/duck2';
@@ -91,14 +92,21 @@ function formatRub(n) {
 // Хранилище временных данных для регистрации/входа
 const authSessions = new Map();
 
+// Глобальный объект для хранения состояний пользователей (для админского бота)
+const userStates = {};
+
 async function initDB() {
   try {
-    // Таблица пользователей
+    // Таблица пользователей (с новыми полями)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         tg_id BIGINT UNIQUE NOT NULL,
         username VARCHAR(100) NOT NULL,
+        first_name VARCHAR(100),
+        last_name VARCHAR(100),
+        telegram_username VARCHAR(100),
+        avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
@@ -227,6 +235,437 @@ function startKeepAlive() {
   keepAliveInterval = setInterval(pingSelf, interval);
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
+}
+
+// ===== БОТ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =====
+userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const params = match[1];
+  
+  try {
+    // Получаем информацию о пользователе
+    const userFirstName = msg.from.first_name || '';
+    const userLastName = msg.from.last_name || '';
+    const userUsername = msg.from.username || '';
+    const fullName = `${userFirstName} ${userLastName}`.trim() || userUsername || `Пользователь ${userId}`;
+    
+    if (params) {
+      const [action, token] = params.split('_');
+      
+      if (action === 'reg' && authSessions.has(token)) {
+        const session = authSessions.get(token);
+        
+        if (session.type === 'register' && session.username) {
+          console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
+          
+          // Получаем фото профиля пользователя из Telegram
+          let photoUrl = null;
+          try {
+            const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
+            if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
+              const file = await userBot.getFile(photos.photos[0][0].file_id);
+              if (file && file.file_path) {
+                photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
+                console.log(`📸 Получена аватарка пользователя: ${photoUrl}`);
+              }
+            }
+          } catch (photoError) {
+            console.log('ℹ️ Не удалось получить фото профиля:', photoError.message);
+          }
+          
+          // Регистрация пользователя
+          const result = await pool.query(
+            `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username) 
+             VALUES ($1, $2, $3, $4, $5, $6) 
+             ON CONFLICT (tg_id) DO UPDATE SET 
+               last_login = CURRENT_TIMESTAMP, 
+               avatar_url = COALESCE($3, users.avatar_url),
+               first_name = COALESCE($4, users.first_name),
+               last_name = COALESCE($5, users.last_name),
+               telegram_username = COALESCE($6, users.telegram_username)
+             RETURNING id`,
+            [userId, session.username, photoUrl, userFirstName, userLastName, userUsername]
+          );
+          
+          const user = result.rows[0];
+          console.log(`✅ Пользователь зарегистрирован с ID: ${user.id}`);
+          
+          // Сохраняем токен для верификации
+          authSessions.set(`auth_${token}`, {
+            userId: user.id,
+            tgId: userId,
+            username: session.username,
+            firstName: userFirstName,
+            lastName: userLastName,
+            telegramUsername: userUsername,
+            avatarUrl: photoUrl,
+            type: 'auth_success'
+          });
+          
+          // Удаляем сессию регистрации
+          authSessions.delete(token);
+          
+          const keyboard = {
+            inline_keyboard: [[
+              { 
+                text: '✅ Перейти в магазин', 
+                url: `${SITE_URL}/beta-duck.html?auth=${token}` 
+              }
+            ]]
+          };
+          
+          const welcomeText = `✅ Регистрация успешна!\n\n` +
+            `👤 Ваш профиль:\n` +
+            `🆔 TG ID: ${userId}\n` +
+            `📛 Имя: ${session.username}\n` +
+            (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
+            (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
+            (userUsername ? `👤 Username: @${userUsername}\n` : '') +
+            (photoUrl ? `🖼️ Аватарка: получена\n` : '') +
+            `\nНажмите кнопку ниже для перехода в магазин:`;
+          
+          await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
+          
+          // Отправляем администратору уведомление о новой регистрации
+          try {
+            const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
+              `🆔 TG ID: ${userId}\n` +
+              `📛 Имя: ${session.username}\n` +
+              (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
+              (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
+              (userUsername ? `👤 Username: @${userUsername}\n` : '') +
+              `📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
+            
+            await adminBot.sendMessage(ADMIN_ID, adminText);
+          } catch (adminError) {
+            console.log('⚠️ Не удалось отправить уведомление администратору:', adminError.message);
+          }
+          
+          return;
+        }
+      } 
+      else if (action === 'login' && authSessions.has(token)) {
+        const session = authSessions.get(token);
+        
+        if (session.type === 'login') {
+          console.log(`🔐 Вход пользователя ${userId} (${fullName})`);
+          
+          // Проверяем, есть ли пользователь
+          const userResult = await pool.query(
+            'SELECT id, username, avatar_url FROM users WHERE tg_id = $1',
+            [userId]
+          );
+          
+          if (userResult.rows.length > 0) {
+            const user = userResult.rows[0];
+            
+            // Получаем актуальное фото профиля (на случай если изменилось)
+            let photoUrl = user.avatar_url;
+            try {
+              const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
+              if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
+                const file = await userBot.getFile(photos.photos[0][0].file_id);
+                if (file && file.file_path) {
+                  photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
+                  
+                  // Обновляем аватарку в БД если она изменилась
+                  await pool.query(
+                    'UPDATE users SET avatar_url = $1 WHERE id = $2',
+                    [photoUrl, user.id]
+                  );
+                }
+              }
+            } catch (photoError) {
+              console.log('ℹ️ Не удалось обновить фото профиля:', photoError.message);
+            }
+            
+            // Обновляем время входа и информацию
+            await pool.query(
+              `UPDATE users SET 
+                last_login = CURRENT_TIMESTAMP,
+                first_name = COALESCE($1, first_name),
+                last_name = COALESCE($2, last_name),
+                telegram_username = COALESCE($3, telegram_username),
+                avatar_url = COALESCE($4, avatar_url)
+               WHERE id = $5`,
+              [userFirstName, userLastName, userUsername, photoUrl, user.id]
+            );
+            
+            // Сохраняем токен для верификации
+            authSessions.set(`auth_${token}`, {
+              userId: user.id,
+              tgId: userId,
+              username: user.username,
+              firstName: userFirstName,
+              lastName: userLastName,
+              telegramUsername: userUsername,
+              avatarUrl: photoUrl,
+              type: 'auth_success'
+            });
+            
+            // Удаляем сессию входа
+            authSessions.delete(token);
+            
+            const keyboard = {
+              inline_keyboard: [[
+                { 
+                  text: '✅ Перейти в магазин', 
+                  url: `${SITE_URL}/beta-duck.html?auth=${token}` 
+                }
+              ]]
+            };
+            
+            const welcomeText = `✅ Вход выполнен!\n\n` +
+              `👤 Ваш профиль:\n` +
+              `🆔 TG ID: ${userId}\n` +
+              `📛 Имя: ${user.username}\n` +
+              (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
+              (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
+              (userUsername ? `👤 Username: @${userUsername}\n` : '') +
+              `\nНажмите кнопку ниже для перехода в магазин:`;
+            
+            await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
+            
+            return;
+          } else {
+            // Пользователь не найден - предлагаем зарегистрироваться
+            await userBot.sendMessage(chatId, 
+              `❌ Аккаунт не найден!\n\n` +
+              `Похоже, вы еще не зарегистрированы в нашем магазине.\n` +
+              `Пожалуйста, перейдите на сайт магазина и нажмите "Зарегистрироваться".\n\n` +
+              `Ссылка на магазин: ${SITE_URL}`
+            );
+            
+            // Удаляем невалидную сессию
+            authSessions.delete(token);
+            return;
+          }
+        }
+      }
+    }
+    
+    // Стандартное приветствие
+    const keyboard = {
+      inline_keyboard: [[
+        { 
+          text: '🛒 Перейти в магазин', 
+          url: SITE_URL 
+        }
+      ]]
+    };
+    
+    await userBot.sendMessage(chatId, 
+      `👋 Привет${userFirstName ? `, ${userFirstName}` : ''}!\n\n` +
+      `Я бот для авторизации в магазине Duck Shop.\n\n` +
+      `Для входа или регистрации:\n` +
+      `1. Перейдите на сайт магазина\n` +
+      `2. Нажмите кнопку "Войти"\n` +
+      `3. Выберите "Войти" или "Зарегистрироваться"\n` +
+      `4. Перейдите по полученной ссылке\n\n` +
+      `Это быстро, безопасно и не требует ввода пароля!`, 
+      { reply_markup: keyboard }
+    );
+    
+  } catch (error) {
+    console.error('❌ Ошибка обработки /start в userBot:', error);
+    
+    try {
+      await userBot.sendMessage(chatId, 
+        `❌ Произошла ошибка при обработке вашего запроса.\n\n` +
+        `Пожалуйста, попробуйте:\n` +
+        `1. Перезагрузить страницу магазина\n` +
+        `2. Повторить попытку авторизации\n` +
+        `3. Если проблема persists, свяжитесь с поддержкой\n\n` +
+        `Ссылка на магазин: ${SITE_URL}`
+      );
+    } catch (sendError) {
+      console.error('❌ Не удалось отправить сообщение об ошибке:', sendError);
+    }
+  }
+});
+
+// Обработка команды /help
+userBot.onText(/\/help/, async (msg) => {
+  const chatId = msg.chat.id;
+  
+  const helpText = `🆘 Помощь по боту авторизации\n\n` +
+    `Этот бот используется для входа и регистрации в магазине Duck Shop.\n\n` +
+    `📋 Как это работает:\n` +
+    `1. На сайте магазина нажмите "Войти"\n` +
+    `2. Выберите "Войти" или "Зарегистрироваться"\n` +
+    `3. Введите данные (для регистрации)\n` +
+    `4. Перейдите по полученной ссылке сюда\n` +
+    `5. Бот подтвердит вашу личность\n` +
+    `6. Вы автоматически вернетесь в магазин\n\n` +
+    `🔐 Безопасность:\n` +
+    `• Бот не хранит ваши пароли\n` +
+    `• Используется безопасное соединение\n` +
+    `• Ваши данные защищены\n\n` +
+    `📞 Поддержка:\n` +
+    `Если у вас возникли проблемы, свяжитесь с администратором магазина.\n\n` +
+    `Ссылка на магазин: ${SITE_URL}`;
+  
+  await userBot.sendMessage(chatId, helpText);
+});
+
+// Обработка команды /profile
+userBot.onText(/\/profile/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  try {
+    const userResult = await pool.query(
+      'SELECT id, username, created_at, last_login, avatar_url FROM users WHERE tg_id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length > 0) {
+      const user = userResult.rows[0];
+      const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
+      const lastLoginDate = new Date(user.last_login).toLocaleDateString('ru-RU');
+      
+      let profileText = `👤 Ваш профиль в магазине:\n\n` +
+        `📛 Имя: ${user.username}\n` +
+        `🆔 ID в магазине: ${user.id}\n` +
+        `🆔 TG ID: ${userId}\n` +
+        `📅 Дата регистрации: ${createdDate}\n` +
+        `📅 Последний вход: ${lastLoginDate}\n\n` +
+        `Вы можете войти в магазин по ссылке ниже:`;
+      
+      const keyboard = {
+        inline_keyboard: [[
+          { 
+            text: '🛒 Перейти в магазин', 
+            url: SITE_URL 
+          }
+        ]]
+      };
+      
+      // Если есть аватарка, отправляем ее
+      if (user.avatar_url) {
+        try {
+          await userBot.sendPhoto(chatId, user.avatar_url, {
+            caption: profileText,
+            reply_markup: keyboard
+          });
+          return;
+        } catch (photoError) {
+          console.log('Не удалось отправить фото:', photoError.message);
+        }
+      }
+      
+      await userBot.sendMessage(chatId, profileText, { reply_markup: keyboard });
+      
+    } else {
+      await userBot.sendMessage(chatId, 
+        `❌ Вы еще не зарегистрированы в магазине.\n\n` +
+        `Пожалуйста, перейдите на сайт и нажмите "Зарегистрироваться".\n\n` +
+        `Ссылка на магазин: ${SITE_URL}`
+      );
+    }
+  } catch (error) {
+    console.error('Ошибка обработки /profile:', error);
+    await userBot.sendMessage(chatId, '❌ Произошла ошибка при получении профиля.');
+  }
+});
+
+// Обработка команды /orders
+userBot.onText(/\/orders/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  
+  try {
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE tg_id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      await userBot.sendMessage(chatId, 
+        `❌ Вы еще не зарегистрированы в магазине.\n\n` +
+        `Пожалуйста, сначала зарегистрируйтесь на сайте.`
+      );
+      return;
+    }
+    
+    const user = userResult.rows[0];
+    
+    const ordersResult = await pool.query(
+      `SELECT order_id, total, status, created_at 
+       FROM orders 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 5`,
+      [user.id]
+    );
+    
+    if (ordersResult.rows.length === 0) {
+      await userBot.sendMessage(chatId, 
+        `📭 У вас пока нет заказов.\n\n` +
+        `Перейдите в магазин, чтобы сделать первую покупку!`
+      );
+      return;
+    }
+    
+    let ordersText = `📦 Ваши последние заказы:\n\n`;
+    
+    ordersResult.rows.forEach((order, index) => {
+      const orderDate = new Date(order.created_at).toLocaleDateString('ru-RU');
+      const statusText = getStatusText(order.status);
+      ordersText += `${index + 1}. Заказ #${order.order_id}\n`;
+      ordersText += `   💰 Сумма: ${formatRub(order.total)}\n`;
+      ordersText += `   📊 Статус: ${statusText}\n`;
+      ordersText += `   📅 Дата: ${orderDate}\n\n`;
+    });
+    
+    const keyboard = {
+      inline_keyboard: [[
+        { 
+          text: '🛒 Перейти в магазин', 
+          url: SITE_URL 
+        }
+      ]]
+    };
+    
+    await userBot.sendMessage(chatId, ordersText, { reply_markup: keyboard });
+    
+  } catch (error) {
+    console.error('Ошибка обработки /orders:', error);
+    await userBot.sendMessage(chatId, '❌ Произошла ошибка при получении заказов.');
+  }
+});
+
+// Функция для получения username бота
+async function getBotUsername() {
+  try {
+    // Сначала пробуем из переменной окружения
+    if (USER_BOT_USERNAME) {
+      return USER_BOT_USERNAME;
+    }
+    
+    // Пробуем получить из бота
+    const botInfo = await userBot.getMe();
+    if (botInfo && botInfo.username) {
+      return botInfo.username;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Ошибка получения username бота:', error);
+    return null;
+  }
+}
+
+// Функция для генерации ссылки на бота
+async function generateBotLink(action, token) {
+  const botUsername = await getBotUsername();
+  
+  if (!botUsername) {
+    throw new Error('Бот не имеет username. Установите username через @BotFather или задайте USER_BOT_USERNAME в .env');
+  }
+  
+  return `https://t.me/${botUsername}?start=${action}_${token}`;
 }
 
 // ===== АДМИНСКИЙ БОТ (существующая логика) =====
@@ -451,9 +890,6 @@ adminBot.on('message', async (msg) => {
   }
 });
 
-// Глобальный объект для хранения состояний пользователей (для админского бота)
-const userStates = {};
-
 async function handleAddProductStep(msg, userState) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
@@ -643,12 +1079,10 @@ async function handleSetGift(isGift, msg, callbackQueryId) {
   }
 }
 
-// Запросить код у пользователя
 async function handleRequestCode(orderId, msg, callbackQueryId) {
   try {
     console.log(`📝 Запрос кода для заказа ${orderId}`);
     
-    // Сбрасываем счетчик неверных попыток при новом запросе
     await pool.query(
       "UPDATE orders SET code_requested = TRUE, wrong_code_attempts = 0, status = 'waiting_code_request' WHERE order_id = $1",
       [orderId]
@@ -680,7 +1114,6 @@ async function handleRequestCode(orderId, msg, callbackQueryId) {
   }
 }
 
-// Отметить код как неверный
 async function handleWrongCode(orderId, msg, callbackQueryId) {
   try {
     console.log(`❌ Отмечаем код как неверный для заказа ${orderId}`);
@@ -701,7 +1134,6 @@ async function handleWrongCode(orderId, msg, callbackQueryId) {
     const currentAttempts = orderResult.rows[0].wrong_code_attempts || 0;
     const newAttempts = currentAttempts + 1;
     
-    // Сбрасываем код, запрос кода и устанавливаем статус 'waiting'
     await pool.query(
       "UPDATE orders SET wrong_code_attempts = $1, code = NULL, code_requested = FALSE, status = 'waiting' WHERE order_id = $2",
       [newAttempts, orderId]
@@ -817,7 +1249,6 @@ async function completeOrder(orderId, msg, callbackQueryId) {
   });
 }
 
-// Подтвердить код (заказ готов)
 async function handleOrderReady(orderId, msg, callbackQueryId) {
   try {
     console.log(`✅ Подтверждаем код для заказа ${orderId}`);
@@ -939,7 +1370,6 @@ async function handleDeleteProduct(productId, msg, callbackQueryId) {
   }
 }
 
-// Показать детали заказа
 async function showOrderDetails(chatId, messageId, orderId) {
   try {
     const result = await pool.query(
@@ -1066,136 +1496,6 @@ async function handleBackToOrders(msg) {
   }
 }
 
-// ===== БОТ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =====
-userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const params = match[1];
-  
-  try {
-    if (params) {
-      // Проверяем токен авторизации
-      const [action, token] = params.split('_');
-      
-      if (action === 'reg' && authSessions.has(token)) {
-        const session = authSessions.get(token);
-        
-        if (session.type === 'register' && session.username) {
-          // Регистрация пользователя
-          const result = await pool.query(
-            'INSERT INTO users (tg_id, username) VALUES ($1, $2) ON CONFLICT (tg_id) DO UPDATE SET last_login = CURRENT_TIMESTAMP RETURNING id',
-            [userId, session.username]
-          );
-          
-          const user = result.rows[0];
-          
-          // Генерируем JWT токен для сайта
-          const websiteToken = crypto.randomBytes(32).toString('hex');
-          await pool.query(
-            'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1',
-            [user.id]
-          );
-          
-          // Сохраняем токен для верификации
-          authSessions.set(`auth_${token}`, {
-            userId: user.id,
-            tgId: userId,
-            username: session.username,
-            token: websiteToken,
-            type: 'auth_success'
-          });
-          
-          // Удаляем сессию регистрации
-          authSessions.delete(token);
-          
-          const keyboard = {
-            inline_keyboard: [[
-              { 
-                text: '✅ Перейти в магазин', 
-                url: `${SITE_URL}/beta-duck.html?auth=${token}` 
-              }
-            ]]
-          };
-          
-          await userBot.sendMessage(chatId, 
-            `✅ Регистрация успешна!\n\n👤 Ваш профиль:\n🆔 TG ID: ${userId}\n📛 Имя: ${session.username}\n\nНажмите кнопку ниже для перехода в магазин:`, 
-            { reply_markup: keyboard }
-          );
-          
-          return;
-        }
-      } 
-      else if (action === 'login' && authSessions.has(token)) {
-        const session = authSessions.get(token);
-        
-        if (session.type === 'login') {
-          // Проверяем, есть ли пользователь
-          const userResult = await pool.query(
-            'SELECT id, username FROM users WHERE tg_id = $1',
-            [userId]
-          );
-          
-          if (userResult.rows.length > 0) {
-            const user = userResult.rows[0];
-            
-            // Обновляем время входа
-            await pool.query(
-              'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1',
-              [user.id]
-            );
-            
-            // Сохраняем токен для верификации
-            authSessions.set(`auth_${token}`, {
-              userId: user.id,
-              tgId: userId,
-              username: user.username,
-              type: 'auth_success'
-            });
-            
-            // Удаляем сессию входа
-            authSessions.delete(token);
-            
-            const keyboard = {
-              inline_keyboard: [[
-                { 
-                  text: '✅ Перейти в магазин', 
-                  url: `${SITE_URL}/beta-duck.html?auth=${token}` 
-                }
-              ]]
-            };
-            
-            await userBot.sendMessage(chatId, 
-              `✅ Вход выполнен!\n\n👤 Ваш профиль:\n🆔 TG ID: ${userId}\n📛 Имя: ${user.username}\n\nНажмите кнопку ниже для перехода в магазин:`, 
-              { reply_markup: keyboard }
-            );
-            
-            return;
-          }
-        }
-      }
-    }
-    
-    // Стандартное приветствие
-    const keyboard = {
-      inline_keyboard: [[
-        { 
-          text: '🛒 Перейти в магазин', 
-          url: SITE_URL 
-        }
-      ]]
-    };
-    
-    await userBot.sendMessage(chatId, 
-      `👋 Привет! Я бот для авторизации в магазине.\n\nДля входа или регистрации перейдите на сайт магазина и нажмите кнопку "Войти".`, 
-      { reply_markup: keyboard }
-    );
-    
-  } catch (error) {
-    console.error('Ошибка обработки /start в userBot:', error);
-    await userBot.sendMessage(chatId, '❌ Произошла ошибка. Попробуйте позже.');
-  }
-});
-
 // ===== API ДЛЯ АВТОРИЗАЦИИ =====
 
 // 1. Начать регистрацию
@@ -1210,30 +1510,38 @@ app.post('/api/auth/start-register', async (req, res) => {
       });
     }
     
-    // Генерируем уникальный токен
     const token = crypto.randomBytes(16).toString('hex');
-    const telegramLink = `https://t.me/${userBot.options.username}?start=reg_${token}`;
     
-    // Сохраняем сессию
-    authSessions.set(token, {
-      type: 'register',
-      username: username,
-      createdAt: Date.now()
-    });
-    
-    // Очищаем старые сессии (старше 10 минут)
-    for (const [key, session] of authSessions.entries()) {
-      if (Date.now() - session.createdAt > 10 * 60 * 1000) {
-        authSessions.delete(key);
+    try {
+      const telegramLink = await generateBotLink('reg', token);
+      
+      // Сохраняем сессию
+      authSessions.set(token, {
+        type: 'register',
+        username: username,
+        createdAt: Date.now()
+      });
+      
+      // Очищаем старые сессии (старше 10 минут)
+      for (const [key, session] of authSessions.entries()) {
+        if (Date.now() - session.createdAt > 10 * 60 * 1000) {
+          authSessions.delete(key);
+        }
       }
+      
+      res.json({
+        success: true,
+        token: token,
+        telegramLink: telegramLink,
+        message: 'Перейдите по ссылке в Telegram бота для завершения регистрации'
+      });
+    } catch (linkError) {
+      console.error('Ошибка генерации ссылки:', linkError);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Ошибка генерации ссылки на бота. Проверьте настройки бота.' 
+      });
     }
-    
-    res.json({
-      success: true,
-      token: token,
-      telegramLink: telegramLink,
-      message: 'Перейдите по ссылке в Telegram бота для завершения регистрации'
-    });
   } catch (error) {
     console.error('Ошибка начала регистрации:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
@@ -1243,29 +1551,37 @@ app.post('/api/auth/start-register', async (req, res) => {
 // 2. Начать вход
 app.post('/api/auth/start-login', async (req, res) => {
   try {
-    // Генерируем уникальный токен
     const token = crypto.randomBytes(16).toString('hex');
-    const telegramLink = `https://t.me/${userBot.options.username}?start=login_${token}`;
     
-    // Сохраняем сессию
-    authSessions.set(token, {
-      type: 'login',
-      createdAt: Date.now()
-    });
-    
-    // Очищаем старые сессии
-    for (const [key, session] of authSessions.entries()) {
-      if (Date.now() - session.createdAt > 10 * 60 * 1000) {
-        authSessions.delete(key);
+    try {
+      const telegramLink = await generateBotLink('login', token);
+      
+      // Сохраняем сессию
+      authSessions.set(token, {
+        type: 'login',
+        createdAt: Date.now()
+      });
+      
+      // Очищаем старые сессии
+      for (const [key, session] of authSessions.entries()) {
+        if (Date.now() - session.createdAt > 10 * 60 * 1000) {
+          authSessions.delete(key);
+        }
       }
+      
+      res.json({
+        success: true,
+        token: token,
+        telegramLink: telegramLink,
+        message: 'Перейдите по ссылке в Telegram бота для входа'
+      });
+    } catch (linkError) {
+      console.error('Ошибка генерации ссылки:', linkError);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Ошибка генерации ссылки на бота. Проверьте настройки бота.' 
+      });
     }
-    
-    res.json({
-      success: true,
-      token: token,
-      telegramLink: telegramLink,
-      message: 'Перейдите по ссылке в Telegram бота для входа'
-    });
   } catch (error) {
     console.error('Ошибка начала входа:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
@@ -1291,7 +1607,11 @@ app.get('/api/auth/check/:token', async (req, res) => {
           user: {
             id: session.userId,
             tgId: session.tgId,
-            username: session.username
+            username: session.username,
+            firstName: session.firstName,
+            lastName: session.lastName,
+            telegramUsername: session.telegramUsername,
+            avatarUrl: session.avatarUrl
           }
         });
       }
@@ -1327,7 +1647,7 @@ app.get('/api/auth/profile', async (req, res) => {
     }
     
     const userResult = await pool.query(
-      'SELECT id, tg_id, username, created_at FROM users WHERE id = $1',
+      'SELECT id, tg_id, username, first_name, last_name, telegram_username, avatar_url, created_at FROM users WHERE id = $1',
       [userId]
     );
     
@@ -1352,6 +1672,10 @@ app.get('/api/auth/profile', async (req, res) => {
         id: user.id,
         tgId: user.tg_id,
         username: user.username,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        telegramUsername: user.telegram_username,
+        avatarUrl: user.avatar_url,
         createdAt: user.created_at
       },
       orders: ordersResult.rows.map(order => ({
@@ -1370,7 +1694,6 @@ app.get('/api/auth/profile', async (req, res) => {
 // 5. Выход из системы
 app.post('/api/auth/logout', async (req, res) => {
   try {
-    // В будущем можно добавить черный список токенов
     res.json({
       success: true,
       message: 'Logged out successfully'
@@ -1384,7 +1707,7 @@ app.post('/api/auth/logout', async (req, res) => {
 // ===== ОБНОВЛЕННЫЙ СОЗДАНИЕ ЗАКАЗА (привязка к пользователю) =====
 app.post('/api/create-order', async (req, res) => {
   try {
-    const { items, total, userId } = req.body; // Добавлен userId
+    const { items, total, userId } = req.body;
     const orderId = 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
     
     await pool.query(
