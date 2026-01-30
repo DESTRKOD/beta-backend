@@ -1294,7 +1294,7 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// 6. Проверка статуса заказа (ОБНОВЛЕНО для нового workflow)
+// 6. Проверка статуса заказа (ОБНОВЛЕННАЯ ВЕРСИЯ с нужными полями)
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1314,13 +1314,14 @@ app.get('/api/order-status/:orderId', async (req, res) => {
       success: true,
       status: order.status,
       paymentStatus: order.payment_status,
-      hasCode: !!order.code,
-      wrongAttempts: order.wrong_code_attempts,
+      hasCode: !!order.code, // Есть ли код
+      wrongAttempts: order.wrong_code_attempts || 0, // Количество неверных попыток
       hasEmail: !!order.email,
       codeRequested: order.code_requested,
-      maxAttemptsReached: order.wrong_code_attempts >= 2,
-      isWaiting: order.status === 'waiting',
-      isCompleted: order.status === 'completed'
+      // ДОБАВЛЯЕМ для waiting_order.html:
+      maxAttemptsReached: (order.wrong_code_attempts || 0) >= 2, // Достигнут ли максимум попыток
+      isCompleted: order.status === 'completed',
+      isWaiting: order.status === 'waiting'
     });
   } catch (error) {
     console.error('Ошибка проверки статуса:', error);
