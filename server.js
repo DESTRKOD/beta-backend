@@ -264,7 +264,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const params = match[1];
   
   try {
-    // Получаем информацию о пользователе
+    // Получаем информацию о пользователе из Telegram
     const userFirstName = msg.from.first_name || '';
     const userLastName = msg.from.last_name || '';
     const userUsername = msg.from.username || '';
@@ -276,8 +276,30 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
       if (action === 'reg' && authSessions.has(token)) {
         const session = authSessions.get(token);
         
-        if (session.type === 'register' && session.username) {
+        if (session.type === 'register') {
           console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
+          
+          // Генерируем username из данных Telegram
+          let username = '';
+          
+          // Пробуем разные варианты для username
+          if (userFirstName && userLastName) {
+            username = `${userFirstName} ${userLastName}`;
+          } else if (userFirstName) {
+            username = userFirstName;
+          } else if (userLastName) {
+            username = userLastName;
+          } else if (userUsername) {
+            username = userUsername;
+          } else {
+            // Если ничего нет, используем ID
+            username = `User_${userId}`;
+          }
+          
+          // Ограничиваем длину username
+          if (username.length > 50) {
+            username = username.substring(0, 47) + '...';
+          }
           
           // Получаем фото профиля пользователя из Telegram
           let photoUrl = null;
@@ -294,7 +316,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             console.log('ℹ️ Не удалось получить фото профиля:', photoError.message);
           }
           
-          // Регистрация пользователя
+          // Регистрация пользователя с данными из Telegram
           const result = await pool.query(
             `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username) 
              VALUES ($1, $2, $3, $4, $5, $6) 
@@ -305,17 +327,17 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                last_name = COALESCE($5, users.last_name),
                telegram_username = COALESCE($6, users.telegram_username)
              RETURNING id`,
-            [userId, session.username, photoUrl, userFirstName, userLastName, userUsername]
+            [userId, username, photoUrl, userFirstName, userLastName, userUsername]
           );
           
           const user = result.rows[0];
-          console.log(`✅ Пользователь зарегистрирован с ID: ${user.id}`);
+          console.log(`✅ Пользователь зарегистрирован с ID: ${user.id}, username: ${username}`);
           
-          // Сохраняем токен для верификации
+          // Сохраняем токен для верификации с полными данными из БД
           authSessions.set(`auth_${token}`, {
             userId: user.id,
             tgId: userId,
-            username: session.username,
+            username: username,
             firstName: userFirstName,
             lastName: userLastName,
             telegramUsername: userUsername,
@@ -338,7 +360,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           const welcomeText = `✅ Регистрация успешна!\n\n` +
             `👤 Ваш профиль:\n` +
             `🆔 TG ID: ${userId}\n` +
-            `📛 Имя: ${session.username}\n` +
+            `📛 Имя: ${username}\n` +
             (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
             (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
             (userUsername ? `👤 Username: @${userUsername}\n` : '') +
@@ -351,7 +373,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           try {
             const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
               `🆔 TG ID: ${userId}\n` +
-              `📛 Имя: ${session.username}\n` +
+              `📛 Имя: ${username}\n` +
               (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
               (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
               (userUsername ? `👤 Username: @${userUsername}\n` : '') +
@@ -412,15 +434,23 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               [userFirstName, userLastName, userUsername, photoUrl, user.id]
             );
             
-            // Сохраняем токен для верификации
+            // Получаем полные данные пользователя для сессии
+            const fullUserResult = await pool.query(
+              'SELECT username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
+              [user.id]
+            );
+            
+            const fullUser = fullUserResult.rows[0];
+            
+            // Сохраняем токен для верификации с полными данными
             authSessions.set(`auth_${token}`, {
               userId: user.id,
               tgId: userId,
-              username: user.username,
-              firstName: userFirstName,
-              lastName: userLastName,
-              telegramUsername: userUsername,
-              avatarUrl: photoUrl,
+              username: fullUser.username,
+              firstName: fullUser.first_name,
+              lastName: fullUser.last_name,
+              telegramUsername: fullUser.telegram_username,
+              avatarUrl: fullUser.avatar_url,
               type: 'auth_success'
             });
             
@@ -439,10 +469,10 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             const welcomeText = `✅ Вход выполнен!\n\n` +
               `👤 Ваш профиль:\n` +
               `🆔 TG ID: ${userId}\n` +
-              `📛 Имя: ${user.username}\n` +
-              (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
-              (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
-              (userUsername ? `👤 Username: @${userUsername}\n` : '') +
+              `📛 Имя: ${fullUser.username}\n` +
+              (fullUser.first_name ? `👤 Имя в TG: ${fullUser.first_name}\n` : '') +
+              (fullUser.last_name ? `👤 Фамилия: ${fullUser.last_name}\n` : '') +
+              (fullUser.telegram_username ? `👤 Username: @${fullUser.telegram_username}\n` : '') +
               `\nНажмите кнопку ниже для перехода в магазин:`;
             
             await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
@@ -536,7 +566,7 @@ userBot.onText(/\/profile/, async (msg) => {
   
   try {
     const userResult = await pool.query(
-      'SELECT id, username, created_at, last_login, avatar_url FROM users WHERE tg_id = $1',
+      'SELECT id, username, first_name, last_name, telegram_username, avatar_url, created_at, last_login FROM users WHERE tg_id = $1',
       [userId]
     );
     
@@ -549,6 +579,9 @@ userBot.onText(/\/profile/, async (msg) => {
         `📛 Имя: ${user.username}\n` +
         `🆔 ID в магазине: ${user.id}\n` +
         `🆔 TG ID: ${userId}\n` +
+        (user.first_name ? `👤 Имя в TG: ${user.first_name}\n` : '') +
+        (user.last_name ? `👤 Фамилия в TG: ${user.last_name}\n` : '') +
+        (user.telegram_username ? `👤 Username: @${user.telegram_username}\n` : '') +
         `📅 Дата регистрации: ${createdDate}\n` +
         `📅 Последний вход: ${lastLoginDate}\n\n` +
         `Вы можете войти в магазин по ссылке ниже:`;
@@ -1518,27 +1551,17 @@ async function handleBackToOrders(msg) {
 
 // ===== API ДЛЯ АВТОРИЗАЦИИ =====
 
-// 1. Начать регистрацию
+// 1. Начать регистрацию (УПРОЩЕННАЯ ВЕРСИЯ - без запроса имени)
 app.post('/api/auth/start-register', async (req, res) => {
   try {
-    const { username } = req.body;
-    
-    if (!username || username.length < 2 || username.length > 50) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Имя должно быть от 2 до 50 символов' 
-      });
-    }
-    
     const token = crypto.randomBytes(16).toString('hex');
     
     try {
       const telegramLink = await generateBotLink('reg', token);
       
-      // Сохраняем сессию
+      // Сохраняем сессию БЕЗ username - он будет получен из Telegram
       authSessions.set(token, {
         type: 'register',
-        username: username,
         createdAt: Date.now()
       });
       
@@ -1567,7 +1590,6 @@ app.post('/api/auth/start-register', async (req, res) => {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-
 // 2. Начать вход
 app.post('/api/auth/start-login', async (req, res) => {
   try {
@@ -1618,6 +1640,22 @@ app.get('/api/auth/check/:token', async (req, res) => {
       const session = authSessions.get(authKey);
       
       if (session.type === 'auth_success') {
+        // Получаем полные данные пользователя из БД
+        const userResult = await pool.query(
+          'SELECT id, tg_id, username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
+          [session.userId]
+        );
+        
+        if (userResult.rows.length === 0) {
+          return res.json({
+            success: true,
+            authenticated: false,
+            expired: true
+          });
+        }
+        
+        const user = userResult.rows[0];
+        
         // Удаляем сессию после проверки
         authSessions.delete(authKey);
         
@@ -1625,13 +1663,13 @@ app.get('/api/auth/check/:token', async (req, res) => {
           success: true,
           authenticated: true,
           user: {
-            id: session.userId,
-            tgId: session.tgId,
-            username: session.username,
-            firstName: session.firstName,
-            lastName: session.lastName,
-            telegramUsername: session.telegramUsername,
-            avatarUrl: session.avatarUrl
+            id: user.id,
+            tgId: user.tg_id,
+            username: user.username,
+            firstName: user.first_name,
+            lastName: user.last_name,
+            telegramUsername: user.telegram_username,
+            avatarUrl: user.avatar_url
           }
         });
       }
