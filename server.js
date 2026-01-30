@@ -16,7 +16,6 @@ const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
-const NOTIFICATION_IP = '147.45.247.34';
 const SERVER_URL = process.env.SERVER_URL || `https://duck-shop-sever.onrender.com`;
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
@@ -50,7 +49,6 @@ try {
 }
 
 // ===== УТИЛИТЫ =====
-// Генерация подписи для Bilee Pay
 async function generateSignature(data, password) {
   const tokenData = {
     ...data,
@@ -69,13 +67,11 @@ async function generateSignature(data, password) {
   return hash.digest('hex');
 }
 
-// Валидация подписи от Bilee
 async function validateSignature(body, password) {
   const validSignature = await generateSignature(body, password);
   return validSignature === body.signature;
 }
 
-// Форматирование суммы
 function formatRub(n) {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
 }
@@ -85,7 +81,6 @@ const userStates = {};
 
 async function initDB() {
   try {
-    // Таблица заказов
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -102,7 +97,6 @@ async function initDB() {
       )
     `);
 
-    // ДОБАВЛЯЕМ недостающие столбцы, если их нет
     try {
       await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS code_requested BOOLEAN DEFAULT FALSE');
       console.log('✅ Столбец code_requested добавлен');
@@ -117,7 +111,6 @@ async function initDB() {
       console.log('ℹ️ Столбец wrong_code_attempts уже существует:', e.message);
     }
 
-    // Таблица товаров
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id VARCHAR(50) PRIMARY KEY,
@@ -129,7 +122,6 @@ async function initDB() {
       )
     `);
 
-    // Создаем индекс для быстрого поиска
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
 
@@ -170,13 +162,11 @@ app.get('/status', (req, res) => {
   });
 });
 
-// Keep-alive механизм
 let keepAliveInterval;
 
 function pingSelf() {
   try {
     const https = require('https');
-    
     const options = {
       hostname: new URL(SERVER_URL).hostname,
       port: 443,
@@ -194,7 +184,6 @@ function pingSelf() {
     });
     
     req.end();
-    
   } catch (error) {
     console.log(`❌ Self-ping exception: ${error.message}`);
   }
@@ -202,10 +191,8 @@ function pingSelf() {
 
 function startKeepAlive() {
   if (keepAliveInterval) clearInterval(keepAliveInterval);
-  
   const interval = 4 * 60 * 1000 + Math.floor(Math.random() * 2 * 60 * 1000);
   keepAliveInterval = setInterval(pingSelf, interval);
-  
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
 }
@@ -216,9 +203,7 @@ process.on('SIGTERM', () => {
     clearInterval(keepAliveInterval);
     keepAliveInterval = null;
   }
-  if (bot) {
-    bot.stopPolling();
-  }
+  if (bot) bot.stopPolling();
   setTimeout(() => process.exit(0), 1000);
 });
 
@@ -228,9 +213,7 @@ process.on('SIGINT', () => {
     clearInterval(keepAliveInterval);
     keepAliveInterval = null;
   }
-  if (bot) {
-    bot.stopPolling();
-  }
+  if (bot) bot.stopPolling();
   setTimeout(() => process.exit(0), 1000);
 });
 
@@ -246,16 +229,7 @@ bot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n` +
-    `📋 Доступные команды:\n` +
-    `/orders - просмотреть заказы\n` +
-    `/stats - статистика магазина\n` +
-    `/products - список товаров\n` +
-    `/add_product - добавить товар\n` +
-    `/delete_product - удалить товар\n` +
-    `/cancel - отменить текущее действие\n\n` +
-    `ℹ️ Для добавления товара используйте /add_product`;
-  
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/delete_product - удалить товар\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product`;
   bot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -264,7 +238,6 @@ bot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
   
   try {
-    // Общая статистика
     const totalOrdersResult = await pool.query(
       "SELECT COUNT(*) as total_orders, SUM(total) as total_revenue FROM orders WHERE payment_status = 'confirmed'"
     );
@@ -282,10 +255,7 @@ bot.onText(/\/stats/, async (msg) => {
     );
     
     const topProductsResult = await pool.query(`
-      SELECT 
-        p.name,
-        COUNT(o.id) as order_count,
-        SUM(o.total) as total_revenue
+      SELECT p.name, COUNT(o.id) as order_count, SUM(o.total) as total_revenue
       FROM orders o
       JOIN LATERAL jsonb_each_text(o.items) AS item(id, quantity) ON true
       JOIN products p ON item.id = p.id
@@ -309,8 +279,7 @@ bot.onText(/\/stats/, async (msg) => {
     
     statsText += `📈 Статусы заказов:\n`;
     statusStatsResult.rows.forEach(row => {
-      const statusText = getStatusText(row.status);
-      statsText += `   ${statusText}: ${row.count}\n`;
+      statsText += `   ${getStatusText(row.status)}: ${row.count}\n`;
     });
     
     if (topProductsResult.rows.length > 0) {
@@ -323,7 +292,6 @@ bot.onText(/\/stats/, async (msg) => {
     }
     
     await bot.sendMessage(msg.chat.id, statsText);
-    
   } catch (error) {
     console.error('❌ Ошибка получения статистики:', error);
     bot.sendMessage(msg.chat.id, '❌ Ошибка при получении статистики');
@@ -362,23 +330,18 @@ bot.onText(/\/products/, async (msg) => {
       ]
     };
     
-    bot.sendMessage(msg.chat.id, productsText, { 
-      reply_markup: keyboard 
-    });
-    
+    bot.sendMessage(msg.chat.id, productsText, { reply_markup: keyboard });
   } catch (error) {
     console.error('❌ Ошибка получения товаров:', error);
     bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
   }
 });
 
-// Команда /add_product - НОВАЯ СИСТЕМА
+// Команда /add_product
 bot.onText(/\/add_product/, async (msg) => {
   if (!isAdmin(msg)) return;
   
   const chatId = msg.chat.id;
-  
-  // Инициализируем состояние для пользователя
   userStates[chatId] = {
     step: 'awaiting_name',
     productData: {}
@@ -408,7 +371,6 @@ bot.onText(/\/delete_product/, async (msg) => {
     };
     
     bot.sendMessage(msg.chat.id, '🗑️ Выберите товар для удаления:', { reply_markup: keyboard });
-    
   } catch (error) {
     console.error('❌ Ошибка получения товаров:', error);
     bot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
@@ -464,14 +426,12 @@ bot.onText(/\/cancel/, async (msg) => {
   }
 });
 
-// Обработка текстовых сообщений (для пошагового добавления товара)
+// Обработка текстовых сообщений
 bot.on('message', async (msg) => {
   if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
   
   const chatId = msg.chat.id;
   const text = msg.text.trim();
-  
-  // Проверяем, находится ли пользователь в процессе добавления товара
   const userState = userStates[chatId];
   
   if (userState && userState.step) {
@@ -490,7 +450,6 @@ async function handleAddProductStep(msg, userState) {
           bot.sendMessage(chatId, '❌ Название должно быть от 2 до 100 символов. Введите название еще раз:');
           return;
         }
-        
         userState.productData.name = text;
         userState.step = 'awaiting_price';
         bot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/4: Введите цену товара (в рублях, только цифры):');
@@ -502,7 +461,6 @@ async function handleAddProductStep(msg, userState) {
           bot.sendMessage(chatId, '❌ Цена должна быть числом от 10 до 10000 рублей. Введите цену еще раз:');
           return;
         }
-        
         userState.productData.price = price;
         userState.step = 'awaiting_image';
         bot.sendMessage(chatId, '✅ Цена сохранена.\n\nШаг 3/4: Введите URL изображения товара:');
@@ -513,10 +471,8 @@ async function handleAddProductStep(msg, userState) {
           bot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://. Введите URL еще раз:');
           return;
         }
-        
         userState.productData.image_url = text;
         userState.step = 'awaiting_gift';
-        
         const keyboard = {
           reply_markup: {
             inline_keyboard: [
@@ -527,19 +483,15 @@ async function handleAddProductStep(msg, userState) {
             ]
           }
         };
-        
         bot.sendMessage(chatId, '✅ URL изображения сохранен.\n\nШаг 4/4: Это подарочный товар?', keyboard);
         break;
         
       case 'awaiting_gift':
-        // Этот случай обрабатывается через callback кнопки
         bot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора типа товара.');
         return;
     }
     
-    // Сохраняем обновленное состояние
     userStates[chatId] = userState;
-    
   } catch (error) {
     console.error('❌ Ошибка обработки шага:', error);
     bot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново командой /add_product');
@@ -561,7 +513,6 @@ bot.on('callback_query', async (callbackQuery) => {
   }
   
   try {
-    // Обработка деталей заказа
     if (data.startsWith('order_detail:')) {
       const orderId = data.split(':')[1];
       await showOrderDetails(msg.chat.id, msg.message_id, orderId);
@@ -569,7 +520,6 @@ bot.on('callback_query', async (callbackQuery) => {
       return;
     }
     
-    // Обработка кнопок в деталях заказа
     const [action, ...params] = data.split(':');
     
     switch(action) {
@@ -592,25 +542,19 @@ bot.on('callback_query', async (callbackQuery) => {
       case 'force_complete':
         await completeOrder(params[0], msg, callbackQuery.id);
         break;
-      
-      // Обработка товаров
       case 'add_product_prompt':
         await bot.answerCallbackQuery(callbackQuery.id);
         bot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
         break;
-      
       case 'delete_product_list':
         await handleDeleteProductList(msg, callbackQuery.id);
         break;
-      
       case 'delete_product':
         await handleDeleteProduct(params[0], msg, callbackQuery.id);
         break;
-      
       case 'set_gift':
         await handleSetGift(params[0], msg, callbackQuery.id);
         break;
-      
       case 'cancel_add_product':
         await bot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
         await bot.editMessageText('❌ Добавление товара отменено.', {
@@ -618,14 +562,12 @@ bot.on('callback_query', async (callbackQuery) => {
           message_id: msg.message_id
         });
         break;
-      
       default:
         await bot.answerCallbackQuery(callbackQuery.id, { 
           text: '⚠️ Неизвестная команда',
           show_alert: true 
         });
     }
-    
   } catch (error) {
     console.error('❌ Ошибка обработки callback:', error);
     await bot.answerCallbackQuery(callbackQuery.id, { 
@@ -635,7 +577,6 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-// Функция обработки выбора подарка
 async function handleSetGift(isGift, msg, callbackQueryId) {
   const chatId = msg.chat.id;
   const userState = userStates[chatId];
@@ -649,12 +590,10 @@ async function handleSetGift(isGift, msg, callbackQueryId) {
     const is_gift = isGift === '1';
     userState.productData.is_gift = is_gift;
     
-    // Генерируем уникальный ID
     const timestamp = Date.now();
     const randomString = Math.random().toString(36).substr(2, 8);
     const id = `prod_${timestamp}${randomString}`;
     
-    // Сохраняем товар в базу данных
     const { name, price, image_url } = userState.productData;
     
     await pool.query(
@@ -662,16 +601,8 @@ async function handleSetGift(isGift, msg, callbackQueryId) {
       [id, name, price, image_url, is_gift]
     );
     
-    // Формируем сообщение об успехе
-    const successText = `🎉 Товар успешно добавлен!\n\n` +
-      `📝 Информация о товаре:\n` +
-      `🆔 ID: ${id}\n` +
-      `🏷️ Название: ${name}\n` +
-      `💰 Цена: ${formatRub(price)}\n` +
-      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
-      `🖼️ Изображение: ${image_url.substring(0, 30)}...`;
+    const successText = `🎉 Товар успешно добавлен!\n\n📝 Информация о товаре:\n🆔 ID: ${id}\n🏷️ Название: ${name}\n💰 Цена: ${formatRub(price)}\n🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n🖼️ Изображение: ${image_url.substring(0, 30)}...`;
     
-    // Удаляем состояние пользователя
     delete userStates[chatId];
     
     await bot.editMessageText(successText, {
@@ -683,19 +614,312 @@ async function handleSetGift(isGift, msg, callbackQueryId) {
       text: '✅ Товар добавлен!',
       show_alert: false
     });
-    
   } catch (error) {
     console.error('❌ Ошибка сохранения товара:', error);
     delete userStates[chatId];
-    
     await bot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка сохранения',
+      show_alert: true
+    });
+  }
+}
+
+// Запросить код у пользователя (ОБНОВЛЕНО)
+async function handleRequestCode(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`📝 Запрос кода для заказа ${orderId}`);
+    
+    // Сбрасываем счетчик неверных попыток при новом запросе
+    await pool.query(
+      "UPDATE orders SET code_requested = TRUE, wrong_code_attempts = 0, status = 'waiting_code_request' WHERE order_id = $1",
+      [orderId]
+    );
+    
+    const orderResult = await pool.query(
+      'SELECT email, total FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    const order = orderResult.rows[0];
+    const message = `📝 Код запрошен для заказа #${orderId}\n\n📧 Email: ${order?.email || 'не указан'}\n💰 Сумма: ${formatRub(order?.total || 0)}\n\n✅ Пользователю открыт экран для ввода кода.`;
+    
+    await bot.editMessageText(message, {
       chat_id: msg.chat.id,
       message_id: msg.message_id
     });
     
     await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка сохранения',
+      text: '✅ Код запрошен у пользователя',
+      show_alert: false
+    });
+  } catch (error) {
+    console.error('❌ Ошибка запроса кода:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при запросе кода',
       show_alert: true
+    });
+  }
+}
+
+// Отметить код как неверный (ОБНОВЛЕНО)
+async function handleWrongCode(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`❌ Отмечаем код как неверный для заказа ${orderId}`);
+    
+    const orderResult = await pool.query(
+      'SELECT wrong_code_attempts, email FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Заказ не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const currentAttempts = orderResult.rows[0].wrong_code_attempts || 0;
+    const newAttempts = currentAttempts + 1;
+    
+    // Сбрасываем код, запрос кода и устанавливаем статус 'waiting'
+    await pool.query(
+      "UPDATE orders SET wrong_code_attempts = $1, code = NULL, code_requested = FALSE, status = 'waiting' WHERE order_id = $2",
+      [newAttempts, orderId]
+    );
+    
+    let message = `❌ Код для заказа #${orderId} отмечен как неверный\n\n`;
+    message += `Неверных попыток: ${newAttempts}\n`;
+    message += `Пользователю показан экран с ошибкой и ожидает нового запроса кода.`;
+    
+    if (newAttempts >= 2) {
+      message += `\n\n⚠️ Пользователь будет перенаправлен в поддержку.`;
+    }
+    
+    await bot.editMessageText(message, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Код отмечен неверным',
+      show_alert: false 
+    });
+  } catch (error) {
+    console.error('❌ Ошибка отметки кода как неверного:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleMarkCompleted(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`✅ Помечаем заказ ${orderId} как готовый`);
+    const orderResult = await pool.query(
+      'SELECT status, email, code, code_requested FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Заказ не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    if (order.status === 'completed') {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '⚠️ Заказ уже отмечен как готовый',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    if (order.code_requested && !order.code) {
+      const confirmKeyboard = {
+        inline_keyboard: [[
+          { text: '✅ Да, все равно завершить', callback_data: `force_complete:${orderId}` },
+          { text: '❌ Отмена', callback_data: `order_detail:${orderId}` }
+        ]]
+      };
+      
+      await bot.editMessageText(`⚠️ Внимание!\n\nКод был запрошен у пользователя, но он еще не ввел его.\n\nВы уверены, что хотите завершить заказ без кода?`, {
+        chat_id: msg.chat.id,
+        message_id: msg.message_id,
+        reply_markup: confirmKeyboard
+      });
+      
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '⚠️ Требуется подтверждение',
+        show_alert: false 
+      });
+      return;
+    }
+    
+    await completeOrder(orderId, msg, callbackQueryId);
+  } catch (error) {
+    console.error('❌ Ошибка отметки заказа как готового:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при обновлении статуса заказа',
+      show_alert: true 
+    });
+  }
+}
+
+async function completeOrder(orderId, msg, callbackQueryId) {
+  await pool.query(
+    "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+    [orderId]
+  );
+  
+  const orderResult = await pool.query(
+    'SELECT email, code FROM orders WHERE order_id = $1',
+    [orderId]
+  );
+  
+  const order = orderResult.rows[0];
+  let message = `✅ Заказ #${orderId} отмечен как готовый\n\n`;
+  if (order.email) message += `📧 Email: ${order.email}\n`;
+  if (order.code) message += `🔢 Код: ${order.code}\n`;
+  message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
+  
+  await bot.editMessageText(message, {
+    chat_id: msg.chat.id,
+    message_id: msg.message_id
+  });
+  
+  await bot.answerCallbackQuery(callbackQueryId, { 
+    text: '✅ Заказ отмечен как готовый',
+    show_alert: false
+  });
+}
+
+// Подтвердить код (заказ готов)
+async function handleOrderReady(orderId, msg, callbackQueryId) {
+  try {
+    console.log(`✅ Подтверждаем код для заказа ${orderId}`);
+    const orderResult = await pool.query(
+      'SELECT code, email, total FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Заказ не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    if (!order.code) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Код не введен пользователем',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    await pool.query(
+      "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+      [orderId]
+    );
+    
+    const message = `✅ Заказ #${orderId} завершен\n\n💰 Сумма: ${formatRub(order.total)}\n📧 Email: ${order.email || 'не указан'}\n🔢 Код: ${order.code}\n\n✅ Заказ успешно обработан и завершен.`;
+    
+    await bot.editMessageText(message, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Заказ завершен',
+      show_alert: false
+    });
+  } catch (error) {
+    console.error('❌ Ошибка подтверждения кода:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleDeleteProductList(msg, callbackQueryId) {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, price FROM products ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { text: '📭 Нет товаров для удаления' });
+      return;
+    }
+    
+    const keyboard = {
+      inline_keyboard: result.rows.map(product => [
+        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `delete_product:${product.id}` }
+      ])
+    };
+    
+    await bot.editMessageText('🗑️ Выберите товар для удаления:', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: keyboard
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId);
+  } catch (error) {
+    console.error('❌ Ошибка получения списка товаров:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при получении списка товаров',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleDeleteProduct(productId, msg, callbackQueryId) {
+  try {
+    const productResult = await pool.query(
+      'SELECT name, price FROM products WHERE id = $1',
+      [productId]
+    );
+    
+    if (productResult.rows.length === 0) {
+      await bot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Товар не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const product = productResult.rows[0];
+    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+    
+    const successText = `🗑️ Товар удален!\n\nНазвание: ${product.name}\nЦена: ${formatRub(product.price)}\nID: ${productId}`;
+    
+    await bot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Товар удален',
+      show_alert: false
+    });
+  } catch (error) {
+    console.error('❌ Ошибка удаления товара:', error);
+    await bot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при удалении товара',
+      show_alert: true 
     });
   }
 }
@@ -722,7 +946,6 @@ async function showOrderDetails(chatId, messageId, orderId) {
     let itemsText = '';
     let totalItems = 0;
     
-    // Получаем названия товаров из базы
     for (const [id, qty] of Object.entries(items)) {
       const productResult = await pool.query(
         'SELECT name FROM products WHERE id = $1',
@@ -744,30 +967,20 @@ async function showOrderDetails(chatId, messageId, orderId) {
       `📅 Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n` +
       `🛒 Состав заказа:\n${itemsText}`;
     
-    // Создаем клавиатуру в зависимости от статуса
     let keyboardRows = [];
     
-    // Кнопка "Сделать готовым" показывается всегда, кроме статуса completed
     if (order.status !== 'completed') {
       keyboardRows.push([
         { text: '✅ Сделать готовым', callback_data: `mark_completed:${orderId}` }
       ]);
     }
     
-    // Кнопка "Запросить код" показывается если:
-    // 1. Есть email
-    // 2. Код еще не запрошен (code_requested = false)
-    // 3. Заказ не завершен
-    // 4. Нет кода
     if (order.email && !order.code_requested && order.status !== 'completed' && !order.code) {
       keyboardRows.push([
         { text: '📝 Запросить код', callback_data: `request_code:${orderId}` }
       ]);
     }
     
-    // Кнопки для проверки кода показываются если:
-    // 1. Есть код
-    // 2. Статус waiting (ожидание проверки)
     if (order.code && order.status === 'waiting') {
       keyboardRows.push([
         { text: '✅ Подтвердить код', callback_data: `order_ready:${orderId}` },
@@ -775,7 +988,6 @@ async function showOrderDetails(chatId, messageId, orderId) {
       ]);
     }
     
-    // Всегда добавляем кнопку возврата
     keyboardRows.push([
       { text: '⬅️ Назад к заказам', callback_data: `back_to_orders:${orderId}` }
     ]);
@@ -789,7 +1001,6 @@ async function showOrderDetails(chatId, messageId, orderId) {
       message_id: messageId,
       reply_markup: keyboard
     });
-    
   } catch (error) {
     console.error('Ошибка показа деталей заказа:', error);
     await bot.editMessageText('❌ Ошибка при получении деталей заказа', {
@@ -799,7 +1010,6 @@ async function showOrderDetails(chatId, messageId, orderId) {
   }
 }
 
-// Вернуться к списку заказов
 async function handleBackToOrders(msg) {
   try {
     const result = await pool.query(
@@ -836,348 +1046,11 @@ async function handleBackToOrders(msg) {
       message_id: msg.message_id,
       reply_markup: keyboard
     });
-    
   } catch (error) {
     console.error('Ошибка возврата к заказам:', error);
   }
 }
 
-// Запросить код у пользователя
-async function handleRequestCode(orderId, msg, callbackQueryId) {
-  try {
-    console.log(`📝 Запрос кода для заказа ${orderId}`);
-    
-    await pool.query(
-      "UPDATE orders SET code_requested = TRUE, status = 'waiting_code_request' WHERE order_id = $1",
-      [orderId]
-    );
-    
-    const orderResult = await pool.query(
-      'SELECT email, total FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    const order = orderResult.rows[0];
-    
-    const message = `📝 Код запрошен для заказа #${orderId}\n\n` +
-      `📧 Email: ${order?.email || 'не указан'}\n` +
-      `💰 Сумма: ${formatRub(order?.total || 0)}\n\n` +
-      `✅ Пользователю открыт экран для ввода кода.`;
-    
-    await bot.editMessageText(message, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Код запрошен у пользователя',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка запроса кода:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка при запросе кода',
-      show_alert: true
-    });
-  }
-}
-
-async function handleMarkCompleted(orderId, msg, callbackQueryId) {
-  try {
-    console.log(`✅ Помечаем заказ ${orderId} как готовый`);
-    
-    // Сначала получаем текущие данные заказа
-    const orderResult = await pool.query(
-      'SELECT status, email, code, code_requested FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    if (orderResult.rows.length === 0) {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Заказ не найден',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const order = orderResult.rows[0];
-    
-    // Проверяем, можно ли пометить заказ готовым
-    if (order.status === 'completed') {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '⚠️ Заказ уже отмечен как готовый',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    // Если код запрошен, но не введен - предупреждаем
-    if (order.code_requested && !order.code) {
-      const confirmKeyboard = {
-        inline_keyboard: [[
-          { text: '✅ Да, все равно завершить', callback_data: `force_complete:${orderId}` },
-          { text: '❌ Отмена', callback_data: `order_detail:${orderId}` }
-        ]]
-      };
-      
-      await bot.editMessageText(
-        `⚠️ Внимание!\n\nКод был запрошен у пользователя, но он еще не ввел его.\n\nВы уверены, что хотите завершить заказ без кода?`,
-        {
-          chat_id: msg.chat.id,
-          message_id: msg.message_id,
-          reply_markup: confirmKeyboard
-        }
-      );
-      
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '⚠️ Требуется подтверждение',
-        show_alert: false 
-      });
-      return;
-    }
-    
-    // Обычное завершение заказа
-    await completeOrder(orderId, msg, callbackQueryId);
-    
-  } catch (error) {
-    console.error('❌ Ошибка отметки заказа как готового:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка при обновлении статуса заказа',
-      show_alert: true 
-    });
-  }
-}
-
-async function completeOrder(orderId, msg, callbackQueryId) {
-  await pool.query(
-    "UPDATE orders SET status = 'completed' WHERE order_id = $1",
-    [orderId]
-  );
-  
-  const orderResult = await pool.query(
-    'SELECT email, code FROM orders WHERE order_id = $1',
-    [orderId]
-  );
-  
-  const order = orderResult.rows[0];
-  
-  let message = `✅ Заказ #${orderId} отмечен как готовый\n\n`;
-  
-  if (order.email) {
-    message += `📧 Email: ${order.email}\n`;
-  }
-  
-  if (order.code) {
-    message += `🔢 Код: ${order.code}\n`;
-  }
-  
-  message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
-  
-  await bot.editMessageText(message, {
-    chat_id: msg.chat.id,
-    message_id: msg.message_id
-  });
-  
-  await bot.answerCallbackQuery(callbackQueryId, { 
-    text: '✅ Заказ отмечен как готовый',
-    show_alert: false
-  });
-}
-
-// Подтвердить код (заказ готов)
-async function handleOrderReady(orderId, msg, callbackQueryId) {
-  try {
-    console.log(`✅ Подтверждаем код для заказа ${orderId}`);
-    
-    const orderResult = await pool.query(
-      'SELECT code, email, total FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    if (orderResult.rows.length === 0) {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Заказ не найден',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const order = orderResult.rows[0];
-    
-    // Проверяем, есть ли код
-    if (!order.code) {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Код не введен пользователем',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    await pool.query(
-      "UPDATE orders SET status = 'completed' WHERE order_id = $1",
-      [orderId]
-    );
-    
-    const message = `✅ Заказ #${orderId} завершен\n\n` +
-      `💰 Сумма: ${formatRub(order.total)}\n` +
-      `📧 Email: ${order.email || 'не указан'}\n` +
-      `🔢 Код: ${order.code}\n\n` +
-      `✅ Заказ успешно обработан и завершен.`;
-    
-    await bot.editMessageText(message, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Заказ завершен',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка подтверждения кода:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  }
-}
-
-// Отметить код как неверный
-async function handleWrongCode(orderId, msg, callbackQueryId) {
-  try {
-    console.log(`❌ Отмечаем код как неверный для заказа ${orderId}`);
-    
-    const orderResult = await pool.query(
-      'SELECT wrong_code_attempts FROM orders WHERE order_id = $1',
-      [orderId]
-    );
-    
-    if (orderResult.rows.length === 0) {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Заказ не найден',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const currentAttempts = orderResult.rows[0].wrong_code_attempts || 0;
-    const newAttempts = currentAttempts + 1;
-    
-    await pool.query(
-      "UPDATE orders SET wrong_code_attempts = $1, code = NULL, status = 'waiting' WHERE order_id = $2",
-      [newAttempts, orderId]
-    );
-    
-    let message = `❌ Код для заказа #${orderId} отмечен как неверный\n\n`;
-    message += `Неверных попыток: ${newAttempts}\n`;
-    message += `Пользователю отправлен запрос на повторный ввод кода.`;
-    
-    if (newAttempts >= 2) {
-      message += `\n\n⚠️ Пользователь будет перенаправлен в поддержку.`;
-    }
-    
-    await bot.editMessageText(message, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Код отмечен неверным',
-      show_alert: false 
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка отметки кода как неверного:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  }
-}
-
-// Управление товарами
-async function handleDeleteProductList(msg, callbackQueryId) {
-  try {
-    const result = await pool.query(
-      'SELECT id, name, price FROM products ORDER BY name'
-    );
-    
-    if (result.rows.length === 0) {
-      await bot.answerCallbackQuery(callbackQueryId, { text: '📭 Нет товаров для удаления' });
-      return;
-    }
-    
-    const keyboard = {
-      inline_keyboard: result.rows.map(product => [
-        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `delete_product:${product.id}` }
-      ])
-    };
-    
-    await bot.editMessageText('🗑️ Выберите товар для удаления:', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id,
-      reply_markup: keyboard
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId);
-    
-  } catch (error) {
-    console.error('❌ Ошибка получения списка товаров:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка при получении списка товаров',
-      show_alert: true 
-    });
-  }
-}
-
-async function handleDeleteProduct(productId, msg, callbackQueryId) {
-  try {
-    // Сначала получаем информацию о товаре
-    const productResult = await pool.query(
-      'SELECT name, price FROM products WHERE id = $1',
-      [productId]
-    );
-    
-    if (productResult.rows.length === 0) {
-      await bot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Товар не найден',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const product = productResult.rows[0];
-    
-    // Удаляем товар
-    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
-    
-    const successText = `🗑️ Товар удален!\n\n` +
-      `Название: ${product.name}\n` +
-      `Цена: ${formatRub(product.price)}\n` +
-      `ID: ${productId}`;
-    
-    await bot.editMessageText(successText, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Товар удален',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка удаления товара:', error);
-    await bot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка при удалении товара',
-      show_alert: true 
-    });
-  }
-}
-
-// Отправка уведомления о новом заказе
 async function sendNewOrderNotification(orderId, total, email) {
   try {
     const result = await pool.query(
@@ -1200,11 +1073,7 @@ async function sendNewOrderNotification(orderId, total, email) {
       totalItems += parseInt(qty);
     }
     
-    const text = `🛒 Новый заказ #${orderId}\n\n` +
-      `💰 Сумма: ${formatRub(total)}\n` +
-      `📦 Товаров: ${totalItems} шт.\n` +
-      `📧 Почта: ${email || 'не указана'}\n\n` +
-      `📋 Состав заказа:\n${itemsText}`;
+    const text = `🛒 Новый заказ #${orderId}\n\n💰 Сумма: ${formatRub(total)}\n📦 Товаров: ${totalItems} шт.\n📧 Почта: ${email || 'не указана'}\n\n📋 Состав заказа:\n${itemsText}`;
     
     const keyboard = {
       inline_keyboard: [[
@@ -1212,10 +1081,7 @@ async function sendNewOrderNotification(orderId, total, email) {
       ]]
     };
     
-    await bot.sendMessage(ADMIN_ID, text, { 
-      reply_markup: keyboard 
-    });
-    
+    await bot.sendMessage(ADMIN_ID, text, { reply_markup: keyboard });
   } catch (error) {
     console.error('Ошибка отправки уведомления:', error);
   }
@@ -1240,7 +1106,6 @@ function getStatusText(status) {
 app.post('/api/create-order', async (req, res) => {
   try {
     const { items, total } = req.body;
-    
     const orderId = 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
     
     await pool.query(
@@ -1340,7 +1205,7 @@ app.get('/api/check-code-request/:orderId', async (req, res) => {
   }
 });
 
-// 4. Проверка кода
+// 4. Проверка кода (ОБНОВЛЕНО - для bad_enter_code.html)
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
@@ -1365,16 +1230,13 @@ app.post('/api/verify-code', async (req, res) => {
       });
     }
     
+    // Сохраняем код и меняем статус на 'waiting'
     await pool.query(
       'UPDATE orders SET code = $1, status = $2 WHERE order_id = $3',
       [code, 'waiting', orderId]
     );
     
-    const text = `🔢 Пользователь ввел код для заказа #${orderId}\n\n` +
-      `💰 Сумма: ${formatRub(order.total)}\n` +
-      `📧 Почта: ${order.email || 'не указана'}\n` +
-      `🔢 Введенный код: ${code}\n\n` +
-      `Проверьте правильность кода и отметьте заказ готовым.`;
+    const text = `🔢 Пользователь ввел код для заказа #${orderId}\n\n💰 Сумма: ${formatRub(order.total)}\n📧 Почта: ${order.email || 'не указана'}\n🔢 Введенный код: ${code}\n\nПроверьте правильность кода и отметьте заказ готовым.`;
     
     const keyboard = {
       inline_keyboard: [
@@ -1385,15 +1247,12 @@ app.post('/api/verify-code', async (req, res) => {
       ]
     };
     
-    await bot.sendMessage(ADMIN_ID, text, { 
-      reply_markup: keyboard 
-    });
+    await bot.sendMessage(ADMIN_ID, text, { reply_markup: keyboard });
     
     res.json({ 
       success: true, 
       status: 'waiting'
     });
-    
   } catch (error) {
     console.error('Ошибка проверки кода:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
@@ -1423,11 +1282,7 @@ app.post('/api/bilee-webhook', async (req, res) => {
       );
       
       if (orderResult.rows.length > 0) {
-        const text = `💰 Получена оплата за заказ #${order_id}\n` +
-          `Сумма: ${formatRub(orderResult.rows[0].total)}\n` +
-          `Почта: ${orderResult.rows[0].email || 'не указана'}\n` +
-          `ID платежа: ${paymentId}`;
-        
+        const text = `💰 Получена оплата за заказ #${order_id}\nСумма: ${formatRub(orderResult.rows[0].total)}\nПочта: ${orderResult.rows[0].email || 'не указана'}\nID платежа: ${paymentId}`;
         await bot.sendMessage(ADMIN_ID, text);
       }
     }
@@ -1439,7 +1294,7 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// 6. Проверка статуса заказа
+// 6. Проверка статуса заказа (ОБНОВЛЕНО для нового workflow)
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1462,7 +1317,10 @@ app.get('/api/order-status/:orderId', async (req, res) => {
       hasCode: !!order.code,
       wrongAttempts: order.wrong_code_attempts,
       hasEmail: !!order.email,
-      codeRequested: order.code_requested
+      codeRequested: order.code_requested,
+      maxAttemptsReached: order.wrong_code_attempts >= 2,
+      isWaiting: order.status === 'waiting',
+      isCompleted: order.status === 'completed'
     });
   } catch (error) {
     console.error('Ошибка проверки статуса:', error);
