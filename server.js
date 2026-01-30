@@ -112,6 +112,26 @@ async function initDB() {
       )
     `);
 
+    // Добавляем отсутствующие столбцы если их нет
+    const columnsToAdd = [
+      { name: 'first_name', type: 'VARCHAR(100)' },
+      { name: 'last_name', type: 'VARCHAR(100)' },
+      { name: 'telegram_username', type: 'VARCHAR(100)' },
+      { name: 'avatar_url', type: 'TEXT' }
+    ];
+    
+    for (const column of columnsToAdd) {
+      try {
+        await pool.query(`
+          ALTER TABLE users 
+          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
+        `);
+        console.log(`ℹ️ Столбец ${column.name} добавлен в таблицу users`);
+      } catch (e) {
+        console.log(`ℹ️ Столбец ${column.name} уже существует:`, e.message);
+      }
+    }
+
     // Таблица заказов (обновляем)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -130,22 +150,22 @@ async function initDB() {
       )
     `);
 
-    try {
-      await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS code_requested BOOLEAN DEFAULT FALSE');
-    } catch (e) {
-      console.log('ℹ️ Столбец code_requested уже существует');
-    }
-
-    try {
-      await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS wrong_code_attempts INTEGER DEFAULT 0');
-    } catch (e) {
-      console.log('ℹ️ Столбец wrong_code_attempts уже существует');
-    }
-
-    try {
-      await pool.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
-    } catch (e) {
-      console.log('ℹ️ Столбец user_id уже существует');
+    const ordersColumnsToAdd = [
+      { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
+      { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
+      { name: 'user_id', type: 'INTEGER REFERENCES users(id) ON DELETE SET NULL' }
+    ];
+    
+    for (const column of ordersColumnsToAdd) {
+      try {
+        await pool.query(`
+          ALTER TABLE orders 
+          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
+        `);
+        console.log(`ℹ️ Столбец ${column.name} добавлен в таблицу orders`);
+      } catch (e) {
+        console.log(`ℹ️ Столбец ${column.name} уже существует:`, e.message);
+      }
     }
 
     await pool.query(`
