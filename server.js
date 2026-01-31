@@ -1717,7 +1717,7 @@ app.get('/api/auth/profile', async (req, res) => {
     
     // Получаем историю заказов (только оплаченные и завершенные)
     const ordersResult = await pool.query(
-      `SELECT order_id, total, status, created_at 
+      `SELECT order_id as id, total, status, created_at as date 
        FROM orders 
        WHERE user_id = $1 AND payment_status = 'confirmed' AND status = 'completed'
        ORDER BY created_at DESC`,
@@ -1736,12 +1736,7 @@ app.get('/api/auth/profile', async (req, res) => {
         avatarUrl: user.avatar_url,
         createdAt: user.created_at
       },
-      orders: ordersResult.rows.map(order => ({
-        id: order.order_id,
-        total: order.total,
-        status: order.status,
-        date: order.created_at
-      }))
+      orders: ordersResult.rows
     });
   } catch (error) {
     console.error('Ошибка получения профиля:', error);
