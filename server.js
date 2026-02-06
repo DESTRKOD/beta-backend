@@ -1996,6 +1996,49 @@ app.get('/api/products', async (req, res) => {
 });
 
 
+
+app.get('/api/order-details/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    
+    // Получаем заказ из БД
+    const result = await pool.query(
+      'SELECT * FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+    
+    const order = result.rows[0];
+    
+    // Форматируем данные
+    const orderData = {
+      id: order.order_id,
+      date: order.created_at,
+      email: order.email,
+      status: order.status,
+      total: order.total,
+      items: order.items || {},
+      code: order.code,
+      paymentStatus: order.payment_status
+    };
+    
+    res.json({
+      success: true,
+      order: orderData
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения деталей заказа:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+*/
+
+
+
 // Эндпоинт для получения конфигурации Firebase
 app.get('/api/firebase-config', (req, res) => {
   res.json({
