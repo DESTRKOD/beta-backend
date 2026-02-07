@@ -1695,7 +1695,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
-// 4. Получить профиль пользователя
+// 4. Получить профиль пользователя (ИЗМЕНЕНО: возвращаем ВСЕ заказы)
 app.get('/api/auth/profile', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -1715,14 +1715,29 @@ app.get('/api/auth/profile', async (req, res) => {
     
     const user = userResult.rows[0];
     
-    // Получаем историю заказов (только оплаченные и завершенные)
+    // Получаем ВСЕ заказы пользователя, а не только завершенные
     const ordersResult = await pool.query(
-      `SELECT order_id as id, total, status, created_at as date 
+      `SELECT order_id as id, total, status, payment_status, email, code, 
+              code_requested, wrong_code_attempts, created_at as date 
        FROM orders 
-       WHERE user_id = $1 AND payment_status = 'confirmed' AND status = 'completed'
+       WHERE user_id = $1 
        ORDER BY created_at DESC`,
       [userId]
     );
+    
+    // Преобразуем заказы для фронтенда
+    const orders = ordersResult.rows.map(order => ({
+      id: order.id,
+      total: order.total,
+      status: order.status,
+      date: order.date,
+      email: order.email,
+      code: order.code,
+      codeRequested: order.code_requested,
+      wrongAttempts: order.wrong_code_attempts,
+      paymentStatus: order.payment_status,
+      isActive: order.status !== 'completed' && order.status !== 'canceled'
+    }));
     
     res.json({
       success: true,
@@ -1736,7 +1751,7 @@ app.get('/api/auth/profile', async (req, res) => {
         avatarUrl: user.avatar_url,
         createdAt: user.created_at
       },
-      orders: ordersResult.rows
+      orders: orders
     });
   } catch (error) {
     console.error('Ошибка получения профиля:', error);
@@ -1995,13 +2010,12 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-
-
+// 12. Получение деталей заказа (ДОБАВЛЕНЫ ПОЛНЫЕ ДАННЫЕ ДЛЯ ОПРЕДЕЛЕНИЯ ЭТАПА)
 app.get('/api/order-details/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
     
-    // Получаем заказ из БД
+    // Получаем заказ из БД со ВСЕМИ полями для определения этапа
     const result = await pool.query(
       'SELECT * FROM orders WHERE order_id = $1',
       [orderId]
@@ -2013,7 +2027,7 @@ app.get('/api/order-details/:orderId', async (req, res) => {
     
     const order = result.rows[0];
     
-    // Форматируем данные
+    // Форматируем данные с дополнительными полями для определения этапа
     const orderData = {
       id: order.order_id,
       date: order.created_at,
@@ -2022,7 +2036,9 @@ app.get('/api/order-details/:orderId', async (req, res) => {
       total: order.total,
       items: order.items || {},
       code: order.code,
-      paymentStatus: order.payment_status
+      paymentStatus: order.payment_status,
+      codeRequested: order.code_requested,
+      wrongAttempts: order.wrong_code_attempts || 0
     };
     
     res.json({
@@ -2036,9 +2052,81 @@ app.get('/api/order-details/:orderId', async (req, res) => {
   }
 });
 
+// 13. Определение этапа заказа (НОВЫЙ API)
+app.get('/api/order-stage/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    
+    const result = await pool.query(
+      'SELECT status, email, code_requested, code, wrong_code_attempts FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+    
+    const order = result.rows[0];
+    const status = order.status;
+    const hasEmail = order.email && order.email.trim() !== '';
+    const codeRequested = order.code_requested;
+    const hasCode = order.code && order.code.trim() !== '';
+    const wrongAttempts = order.wrong_code_attempts || 0;
+    
+    let stage = '';
+    let redirectUrl = '';
+    
+    // Определяем этап
+    if (!hasEmail && (status === 'new' || status === 'pending' || status === 'confirmed')) {
+      // Email еще не введен
+      stage = 'email_required';
+      redirectUrl = `success.html?order=${orderId}`;
+    } else if (hasEmail && !codeRequested && status === 'waiting_code_request') {
+      // Email введен, ждем запроса кода
+      stage = 'waiting_code_request';
+      redirectUrl = `waiting_code.html?order=${orderId}`;
+    } else if (codeRequested && !hasCode) {
+      // Код запрошен, нужно ввести
+      if (wrongAttempts >= 2) {
+        stage = 'support_needed';
+        redirectUrl = `bad_enter_code.html?order=${orderId}`;
+      } else {
+        stage = 'code_required';
+        redirectUrl = `code.html?order=${orderId}`;
+      }
+    } else if (hasCode && status === 'waiting') {
+      // Код введен, ждем выполнения
+      stage = 'waiting_execution';
+      redirectUrl = `waiting_order.html?order=${orderId}`;
+    } else if (status === 'completed') {
+      // Заказ завершен
+      stage = 'completed';
+      redirectUrl = `ready.html?order=${orderId}`;
+    } else {
+      // Неизвестный этап
+      stage = 'unknown';
+      redirectUrl = `profile.html`;
+    }
+    
+    res.json({
+      success: true,
+      stage: stage,
+      redirectUrl: redirectUrl,
+      order: {
+        status: status,
+        hasEmail: hasEmail,
+        codeRequested: codeRequested,
+        hasCode: hasCode,
+        wrongAttempts: wrongAttempts
+      }
+    });
+    
+  } catch (error) {
+    console.error('Ошибка определения этапа заказа:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
 
-
-// Эндпоинт для получения конфигурации Firebase
 app.get('/api/firebase-config', (req, res) => {
   res.json({
     success: true,
