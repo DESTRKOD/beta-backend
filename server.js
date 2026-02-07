@@ -19,7 +19,7 @@ const USER_BOT_TOKEN = process.env.USER_BOT_TOKEN;
 const USER_BOT_USERNAME = process.env.USER_BOT_USERNAME;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL || `https://duck-shop-sever.onrender.com`;
-const SITE_URL = process.env.SITE_URL || 'https://DESTRKOD.github.io/duck2';
+const SITE_URL = process.env.SITE_URL || 'https://DESTRKOD.github.io/duck2/beta-duck';
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
 app.use(cors());
@@ -733,7 +733,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/delete_product - удалить товар\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -829,6 +829,9 @@ adminBot.onText(/\/products/, async (msg) => {
       inline_keyboard: [
         [
           { text: '➕ Добавить товар', callback_data: 'add_product_prompt' },
+          { text: '💰 Изменить цену', callback_data: 'edit_price_list' }
+        ],
+        [
           { text: '🗑️ Удалить товар', callback_data: 'delete_product_list' }
         ]
       ]
@@ -852,6 +855,33 @@ adminBot.onText(/\/add_product/, async (msg) => {
   };
   
   adminBot.sendMessage(chatId, '📝 Давайте добавим новый товар.\n\nШаг 1/4: Введите название товара:');
+});
+
+// Команда /edit_price (НОВАЯ КОМАНДА)
+adminBot.onText(/\/edit_price/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, name, price FROM products ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '📭 Нет товаров для изменения цены');
+      return;
+    }
+    
+    const keyboard = {
+      inline_keyboard: result.rows.map(product => [
+        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `edit_price:${product.id}` }
+      ])
+    };
+    
+    adminBot.sendMessage(msg.chat.id, '💰 Выберите товар для изменения цены:', { reply_markup: keyboard });
+  } catch (error) {
+    console.error('❌ Ошибка получения товаров:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка товаров');
+  }
 });
 
 // Команда /delete_product
@@ -930,7 +960,7 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
-// Обработка текстовых сообщений
+// Обработка текстовых сообщений (для добавления товара и изменения цены)
 adminBot.on('message', async (msg) => {
   if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
   
@@ -939,9 +969,56 @@ adminBot.on('message', async (msg) => {
   const userState = userStates[chatId];
   
   if (userState && userState.step) {
-    await handleAddProductStep(msg, userState);
+    if (userState.action === 'edit_price') {
+      await handleEditPriceStep(msg, userState);
+    } else {
+      await handleAddProductStep(msg, userState);
+    }
   }
 });
+
+// Обработка шагов изменения цены
+async function handleEditPriceStep(msg, userState) {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  try {
+    switch(userState.step) {
+      case 'awaiting_new_price':
+        const price = parseInt(text);
+        if (isNaN(price) || price < 10 || price > 10000) {
+          adminBot.sendMessage(chatId, '❌ Цена должна быть числом от 10 до 10000 рублей. Введите цену еще раз:');
+          return;
+        }
+        
+        // Сохраняем новую цену
+        const productId = userState.productId;
+        const productName = userState.productName;
+        const oldPrice = userState.oldPrice;
+        
+        // Обновляем цену в базе данных
+        await pool.query(
+          'UPDATE products SET price = $1 WHERE id = $2',
+          [price, productId]
+        );
+        
+        const successText = `✅ Цена товара изменена!\n\n🏷️ Товар: ${productName}\n🆔 ID: ${productId}\n💰 Было: ${formatRub(oldPrice)}\n💰 Стало: ${formatRub(price)}`;
+        
+        delete userStates[chatId];
+        
+        adminBot.sendMessage(chatId, successText);
+        
+        // Отправляем уведомление об изменении
+        const notificationText = `💰 Цена товара изменена администратором\n\n🏷️ Товар: ${productName}\n💰 Было: ${formatRub(oldPrice)}\n💰 Стало: ${formatRub(price)}\n📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
+        await adminBot.sendMessage(ADMIN_ID, notificationText);
+        break;
+    }
+  } catch (error) {
+    console.error('❌ Ошибка изменения цены:', error);
+    adminBot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново командой /edit_price');
+    delete userStates[chatId];
+  }
+}
 
 async function handleAddProductStep(msg, userState) {
   const chatId = msg.chat.id;
@@ -1050,6 +1127,12 @@ adminBot.on('callback_query', async (callbackQuery) => {
         await adminBot.answerCallbackQuery(callbackQuery.id);
         adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
         break;
+      case 'edit_price_list':
+        await handleEditPriceList(msg, callbackQuery.id);
+        break;
+      case 'edit_price':
+        await handleEditPrice(params[0], msg, callbackQuery.id);
+        break;
       case 'delete_product_list':
         await handleDeleteProductList(msg, callbackQuery.id);
         break;
@@ -1080,6 +1163,88 @@ adminBot.on('callback_query', async (callbackQuery) => {
     });
   }
 });
+
+// Обработка списка товаров для изменения цены
+async function handleEditPriceList(msg, callbackQueryId) {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, price FROM products ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { text: '📭 Нет товаров для изменения цены' });
+      return;
+    }
+    
+    const keyboard = {
+      inline_keyboard: result.rows.map(product => [
+        { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `edit_price:${product.id}` }
+      ])
+    };
+    
+    await adminBot.editMessageText('💰 Выберите товар для изменения цены:', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: keyboard
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId);
+  } catch (error) {
+    console.error('❌ Ошибка получения списка товаров:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка при получении списка товаров',
+      show_alert: true 
+    });
+  }
+}
+
+// Обработка выбора товара для изменения цены
+async function handleEditPrice(productId, msg, callbackQueryId) {
+  try {
+    const productResult = await pool.query(
+      'SELECT name, price FROM products WHERE id = $1',
+      [productId]
+    );
+    
+    if (productResult.rows.length === 0) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Товар не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const product = productResult.rows[0];
+    const chatId = msg.chat.id;
+    
+    // Сохраняем состояние для изменения цены
+    userStates[chatId] = {
+      action: 'edit_price',
+      step: 'awaiting_new_price',
+      productId: productId,
+      productName: product.name,
+      oldPrice: product.price
+    };
+    
+    const infoText = `💰 Изменение цены товара\n\n🏷️ Товар: ${product.name}\n🆔 ID: ${productId}\n💰 Текущая цена: ${formatRub(product.price)}\n\nВведите новую цену (в рублях, только цифры):`;
+    
+    await adminBot.editMessageText(infoText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: 'Введите новую цену',
+      show_alert: false
+    });
+  } catch (error) {
+    console.error('❌ Ошибка выбора товара для изменения цены:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
 
 async function handleSetGift(isGift, msg, callbackQueryId) {
   const chatId = msg.chat.id;
