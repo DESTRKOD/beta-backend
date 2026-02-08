@@ -18,8 +18,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const USER_BOT_TOKEN = process.env.USER_BOT_TOKEN;
 const USER_BOT_USERNAME = process.env.USER_BOT_USERNAME;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
-const SERVER_URL = process.env.SERVER_URL || `https://duck-shop-sever.onrender.com`;
-const SITE_URL = process.env.SITE_URL || 'https://DESTRKOD.github.io/duck2/beta-duck';
+const SERVER_URL = process.env.SERVER_URL;
+const SITE_URL = process.env.SITE_URL;
 
 // ===== ИНИЦИАЛИЗАЦИЯ =====
 app.use(cors());
@@ -352,7 +352,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             inline_keyboard: [[
               { 
                 text: '✅ Перейти в магазин', 
-                url: `${SITE_URL}/beta-duck.html?auth=${token}` 
+                url: `${SITE_URL}/main.html?auth=${token}` 
               }
             ]]
           };
@@ -461,7 +461,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               inline_keyboard: [[
                 { 
                   text: '✅ Перейти в магазин', 
-                  url: `${SITE_URL}/beta-duck.html?auth=${token}` 
+                  url: `${SITE_URL}/main.html?auth=${token}` 
                 }
               ]]
             };
@@ -1956,7 +1956,7 @@ app.post('/api/create-order', async (req, res) => {
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
       success_url: `${SITE_URL}/success.html?order=${orderId}`,
-      fail_url: `${SITE_URL}/beta-duck.html?payment=fail&order=${orderId}`,
+      fail_url: `${SITE_URL}/main.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     };
     
