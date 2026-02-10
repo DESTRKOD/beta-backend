@@ -1,4 +1,3 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
@@ -10,7 +9,6 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ===== КОНФИГУРАЦИЯ =====
 const BILEE_API_URL = 'https://paymentgate.bilee.ru/api';
 const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
@@ -21,17 +19,14 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
-// ===== ИНИЦИАЛИЗАЦИЯ =====
 app.use(cors());
 app.use(express.json());
 
-// Подключение к PostgreSQL (Render)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Два Telegram бота
 let adminBot;
 let userBot;
 
@@ -61,7 +56,6 @@ try {
   process.exit(1);
 }
 
-// ===== УТИЛИТЫ =====
 async function generateSignature(data, password) {
   const tokenData = {
     ...data,
@@ -89,16 +83,12 @@ function formatRub(n) {
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
 }
 
-// Хранилище временных данных для регистрации/входа
 const authSessions = new Map();
-
-// Глобальный объект для хранения состояний пользователей (для админского бота)
 const userStates = {};
-const orderPages = {}; // Для хранения текущей страницы при пагинации
+const orderPages = {};
 
 async function initDB() {
   try {
-    // Таблица пользователей (с новыми полями)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -113,7 +103,6 @@ async function initDB() {
       )
     `);
 
-    // Добавляем отсутствующие столбцы если их нет
     const columnsToAdd = [
       { name: 'first_name', type: 'VARCHAR(100)' },
       { name: 'last_name', type: 'VARCHAR(100)' },
@@ -127,13 +116,10 @@ async function initDB() {
           ALTER TABLE users 
           ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
         `);
-        console.log(`ℹ️ Столбец ${column.name} добавлен в таблицу users`);
       } catch (e) {
-        console.log(`ℹ️ Столбец ${column.name} уже существует:`, e.message);
       }
     }
 
-    // Таблица заказов (обновляем - добавляем refund_amount)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -164,9 +150,7 @@ async function initDB() {
           ALTER TABLE orders 
           ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
         `);
-        console.log(`ℹ️ Столбец ${column.name} добавлен в таблицу orders`);
       } catch (e) {
-        console.log(`ℹ️ Столбец ${column.name} уже существует:`, e.message);
       }
     }
 
@@ -181,7 +165,6 @@ async function initDB() {
       )
     `);
 
-    // Индексы
     await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
@@ -193,9 +176,7 @@ async function initDB() {
   }
 }
 
-// ===== KEEP-ALIVE СИСТЕМА =====
 app.get('/health', (req, res) => {
-  console.log(`[${new Date().toLocaleTimeString('ru-RU')}] Health check from ${req.ip}`);
   res.json({
     status: 'healthy',
     service: 'duck-shop-server',
@@ -205,7 +186,6 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/wakeup', (req, res) => {
-  console.log(`🔔 [${new Date().toLocaleTimeString('ru-RU')}] Сервер разбужен внешним пингом от ${req.ip}`);
   res.json({ 
     status: 'awake', 
     time: new Date().toISOString()
@@ -238,16 +218,13 @@ function pingSelf() {
     };
     
     const req = https.request(options, (res) => {
-      console.log(`✅ Self-ping successful (${res.statusCode})`);
     });
     
     req.on('error', (err) => {
-      console.log(`⚠️ Self-ping error: ${err.message}`);
     });
     
     req.end();
   } catch (error) {
-    console.log(`❌ Self-ping exception: ${error.message}`);
   }
 }
 
@@ -259,14 +236,12 @@ function startKeepAlive() {
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
 }
 
-// ===== БОТ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ (без изменений) =====
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const params = match[1];
   
   try {
-    // Получаем информацию о пользователе из Telegram
     const userFirstName = msg.from.first_name || '';
     const userLastName = msg.from.last_name || '';
     const userUsername = msg.from.username || '';
@@ -281,10 +256,8 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'register') {
           console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
           
-          // Генерируем username из данных Telegram
           let username = '';
           
-          // Пробуем разные варианты для username
           if (userFirstName && userLastName) {
             username = `${userFirstName} ${userLastName}`;
           } else if (userFirstName) {
@@ -294,16 +267,13 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           } else if (userUsername) {
             username = userUsername;
           } else {
-            // Если ничего нет, используем ID
             username = `User_${userId}`;
           }
           
-          // Ограничиваем длину username
           if (username.length > 50) {
             username = username.substring(0, 47) + '...';
           }
           
-          // Получаем фото профиля пользователя из Telegram
           let photoUrl = null;
           try {
             const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
@@ -311,14 +281,11 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               const file = await userBot.getFile(photos.photos[0][0].file_id);
               if (file && file.file_path) {
                 photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
-                console.log(`📸 Получена аватарка пользователя: ${photoUrl}`);
               }
             }
           } catch (photoError) {
-            console.log('ℹ️ Не удалось получить фото профиля:', photoError.message);
           }
           
-          // Регистрация пользователя с данными из Telegram
           const result = await pool.query(
             `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username) 
              VALUES ($1, $2, $3, $4, $5, $6) 
@@ -333,9 +300,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           );
           
           const user = result.rows[0];
-          console.log(`✅ Пользователь зарегистрирован с ID: ${user.id}, username: ${username}`);
           
-          // Сохраняем токен для верификации с полными данными из БД
           authSessions.set(`auth_${token}`, {
             userId: user.id,
             tgId: userId,
@@ -347,7 +312,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             type: 'auth_success'
           });
           
-          // Удаляем сессию регистрации
           authSessions.delete(token);
           
           const keyboard = {
@@ -371,7 +335,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           
           await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
           
-          // Отправляем администратору уведомление о новой регистрации
           try {
             const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
               `🆔 TG ID: ${userId}\n` +
@@ -383,7 +346,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             
             await adminBot.sendMessage(ADMIN_ID, adminText);
           } catch (adminError) {
-            console.log('⚠️ Не удалось отправить уведомление администратору:', adminError.message);
           }
           
           return;
@@ -395,7 +357,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'login') {
           console.log(`🔐 Вход пользователя ${userId} (${fullName})`);
           
-          // Проверяем, есть ли пользователь
           const userResult = await pool.query(
             'SELECT id, username, avatar_url FROM users WHERE tg_id = $1',
             [userId]
@@ -404,7 +365,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           if (userResult.rows.length > 0) {
             const user = userResult.rows[0];
             
-            // Получаем актуальное фото профиля (на случай если изменилось)
             let photoUrl = user.avatar_url;
             try {
               const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
@@ -413,7 +373,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                 if (file && file.file_path) {
                   photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
                   
-                  // Обновляем аватарку в БД если она изменилась
                   await pool.query(
                     'UPDATE users SET avatar_url = $1 WHERE id = $2',
                     [photoUrl, user.id]
@@ -421,10 +380,8 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                 }
               }
             } catch (photoError) {
-              console.log('ℹ️ Не удалось обновить фото профиля:', photoError.message);
             }
             
-            // Обновляем время входа и информацию
             await pool.query(
               `UPDATE users SET 
                 last_login = CURRENT_TIMESTAMP,
@@ -436,7 +393,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               [userFirstName, userLastName, userUsername, photoUrl, user.id]
             );
             
-            // Получаем полные данные пользователя для сессии
             const fullUserResult = await pool.query(
               'SELECT username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
               [user.id]
@@ -444,7 +400,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             
             const fullUser = fullUserResult.rows[0];
             
-            // Сохраняем токен для верификации с полными данными
             authSessions.set(`auth_${token}`, {
               userId: user.id,
               tgId: userId,
@@ -456,7 +411,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               type: 'auth_success'
             });
             
-            // Удаляем сессию входа
             authSessions.delete(token);
             
             const keyboard = {
@@ -481,7 +435,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             
             return;
           } else {
-            // Пользователь не найден - предлагаем зарегистрироваться
             await userBot.sendMessage(chatId, 
               `❌ Аккаунт не найден!\n\n` +
               `Похоже, вы еще не зарегистрированы в нашем магазине.\n` +
@@ -489,7 +442,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               `Ссылка на магазин: ${SITE_URL}`
             );
             
-            // Удаляем невалидную сессию
             authSessions.delete(token);
             return;
           }
@@ -497,7 +449,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
       }
     }
     
-    // Стандартное приветствие
     const keyboard = {
       inline_keyboard: [[
         { 
@@ -532,12 +483,10 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         `Ссылка на магазин: ${SITE_URL}`
       );
     } catch (sendError) {
-      console.error('❌ Не удалось отправить сообщение об ошибке:', sendError);
     }
   }
 });
 
-// Обработка команды /help
 userBot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
   
@@ -561,7 +510,6 @@ userBot.onText(/\/help/, async (msg) => {
   await userBot.sendMessage(chatId, helpText);
 });
 
-// Обработка команды /profile
 userBot.onText(/\/profile/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -597,7 +545,6 @@ userBot.onText(/\/profile/, async (msg) => {
         ]]
       };
       
-      // Если есть аватарка, отправляем ее
       if (user.avatar_url) {
         try {
           await userBot.sendPhoto(chatId, user.avatar_url, {
@@ -606,7 +553,6 @@ userBot.onText(/\/profile/, async (msg) => {
           });
           return;
         } catch (photoError) {
-          console.log('Не удалось отправить фото:', photoError.message);
         }
       }
       
@@ -625,7 +571,6 @@ userBot.onText(/\/profile/, async (msg) => {
   }
 });
 
-// Обработка команды /orders
 userBot.onText(/\/orders/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -687,19 +632,16 @@ userBot.onText(/\/orders/, async (msg) => {
     
   } catch (error) {
     console.error('Ошибка обработки /orders:', error);
-    await userBot.sendMessage(chatId, '❌ Произошла ошибка при получении заказов.');
+    await userBot.sendMessage(chatId, '❌ Произошла ошибка при получении заказов');
   }
 });
 
-// Функция для получения username бота
 async function getBotUsername() {
   try {
-    // Сначала пробуем из переменной окружения
     if (USER_BOT_USERNAME) {
       return USER_BOT_USERNAME;
     }
     
-    // Пробуем получить из бота
     const botInfo = await userBot.getMe();
     if (botInfo && botInfo.username) {
       return botInfo.username;
@@ -712,7 +654,6 @@ async function getBotUsername() {
   }
 }
 
-// Функция для генерации ссылки на бота
 async function generateBotLink(action, token) {
   const botUsername = await getBotUsername();
   
@@ -723,12 +664,10 @@ async function generateBotLink(action, token) {
   return `https://t.me/${botUsername}?start=${action}_${token}`;
 }
 
-// ===== АДМИНСКИЙ БОТ (с изменениями) =====
 function isAdmin(msg) {
   return msg.from.id === ADMIN_ID;
 }
 
-// Обновленная функция getStatusText с новым статусом manyback
 function getStatusText(status) {
   const statusMap = {
     'new': '🆕 Новый',
@@ -743,7 +682,6 @@ function getStatusText(status) {
   return statusMap[status] || status;
 }
 
-// Команда /start
 adminBot.onText(/\/start/, async (msg) => {
   if (!isAdmin(msg)) {
     adminBot.sendMessage(msg.chat.id, '⛔ Доступ запрещен');
@@ -754,7 +692,6 @@ adminBot.onText(/\/start/, async (msg) => {
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
-// Команда /stats
 adminBot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -775,17 +712,6 @@ adminBot.onText(/\/stats/, async (msg) => {
       "SELECT status, COUNT(*) as count FROM orders GROUP BY status ORDER BY count DESC"
     );
     
-    const topProductsResult = await pool.query(`
-      SELECT p.name, COUNT(o.id) as order_count, SUM(o.total) as total_revenue
-      FROM orders o
-      JOIN LATERAL jsonb_each_text(o.items) AS item(id, quantity) ON true
-      JOIN products p ON item.id = p.id
-      WHERE o.payment_status = 'confirmed'
-      GROUP BY p.id, p.name
-      ORDER BY total_revenue DESC
-      LIMIT 5
-    `);
-    
     const totalOrders = totalOrdersResult.rows[0]?.total_orders || 0;
     const totalRevenue = totalOrdersResult.rows[0]?.total_revenue || 0;
     const todayOrders = todayOrdersResult.rows[0]?.today_orders || 0;
@@ -803,15 +729,6 @@ adminBot.onText(/\/stats/, async (msg) => {
       statsText += `   ${getStatusText(row.status)}: ${row.count}\n`;
     });
     
-    if (topProductsResult.rows.length > 0) {
-      statsText += `\n🏆 Топ товаров по выручке:\n`;
-      topProductsResult.rows.forEach((row, index) => {
-        statsText += `${index + 1}. ${row.name}\n`;
-        statsText += `   Заказов: ${row.order_count}\n`;
-        statsText += `   Выручка: ${formatRub(row.total_revenue)}\n`;
-      });
-    }
-    
     await adminBot.sendMessage(msg.chat.id, statsText);
   } catch (error) {
     console.error('❌ Ошибка получения статистики:', error);
@@ -819,7 +736,6 @@ adminBot.onText(/\/stats/, async (msg) => {
   }
 });
 
-// Команда /products
 adminBot.onText(/\/products/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -861,7 +777,6 @@ adminBot.onText(/\/products/, async (msg) => {
   }
 });
 
-// Команда /add_product
 adminBot.onText(/\/add_product/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -874,7 +789,6 @@ adminBot.onText(/\/add_product/, async (msg) => {
   adminBot.sendMessage(chatId, '📝 Давайте добавим новый товар.\n\nШаг 1/4: Введите название товара:');
 });
 
-// Команда /edit_price
 adminBot.onText(/\/edit_price/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -901,7 +815,6 @@ adminBot.onText(/\/edit_price/, async (msg) => {
   }
 });
 
-// Команда /delete_product
 adminBot.onText(/\/delete_product/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -928,7 +841,6 @@ adminBot.onText(/\/delete_product/, async (msg) => {
   }
 });
 
-// ОБНОВЛЕННАЯ Команда /orders с пагинацией и кликабельными номерами заказов
 adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
@@ -938,7 +850,6 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
   const offset = (page - 1) * limit;
   
   try {
-    // Получаем оплаченные, завершенные и заказы в работе
     const result = await pool.query(
       `SELECT order_id, total, status, created_at, payment_status 
        FROM orders 
@@ -948,7 +859,6 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
       [limit, offset]
     );
     
-    // Получаем общее количество заказов для пагинации
     const countResult = await pool.query(
       `SELECT COUNT(*) as total 
        FROM orders 
@@ -963,12 +873,10 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
       return;
     }
     
-    // Сохраняем текущую страницу для пользователя
     orderPages[chatId] = page;
     
     let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
     
-    // Создаем inline-кнопки для каждого заказа
     const inlineKeyboard = [];
     
     result.rows.forEach((order, index) => {
@@ -978,7 +886,6 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
       ordersText += `   Статус: ${getStatusText(order.status)}\n`;
       ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
       
-      // Добавляем кнопку с номером заказа
       inlineKeyboard.push([
         { 
           text: `#${order.order_id} - ${formatRub(order.total)}`, 
@@ -987,7 +894,6 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
       ]);
     });
     
-    // Добавляем кнопки пагинации если нужно
     const paginationButtons = [];
     
     if (page > 1) {
@@ -1013,7 +919,6 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
   }
 });
 
-// Команда /cancel
 adminBot.onText(/\/cancel/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -1024,7 +929,6 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
-// Обработка текстовых сообщений (для добавления товара, изменения цены и возврата)
 adminBot.on('message', async (msg) => {
   if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
   
@@ -1043,7 +947,6 @@ adminBot.on('message', async (msg) => {
   }
 });
 
-// Обработка шагов изменения цены
 async function handleEditPriceStep(msg, userState) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
@@ -1057,12 +960,10 @@ async function handleEditPriceStep(msg, userState) {
           return;
         }
         
-        // Сохраняем новую цену
         const productId = userState.productId;
         const productName = userState.productName;
         const oldPrice = userState.oldPrice;
         
-        // Обновляем цену в базе данных
         await pool.query(
           'UPDATE products SET price = $1 WHERE id = $2',
           [price, productId]
@@ -1074,7 +975,6 @@ async function handleEditPriceStep(msg, userState) {
         
         adminBot.sendMessage(chatId, successText);
         
-        // Отправляем уведомление об изменении
         const notificationText = `💰 Цена товара изменена администратором\n\n🏷️ Товар: ${productName}\n💰 Было: ${formatRub(oldPrice)}\n💰 Стало: ${formatRub(price)}\n📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
         await adminBot.sendMessage(ADMIN_ID, notificationText);
         break;
@@ -1086,7 +986,6 @@ async function handleEditPriceStep(msg, userState) {
   }
 }
 
-// Обработка шагов оформления возврата
 async function handleRefundStep(msg, userState) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
@@ -1102,7 +1001,6 @@ async function handleRefundStep(msg, userState) {
           return;
         }
         
-        // Обновляем статус заказа и сумму возврата
         const orderId = userState.orderId;
         
         await pool.query(
@@ -1116,7 +1014,6 @@ async function handleRefundStep(msg, userState) {
         
         adminBot.sendMessage(chatId, successText);
         
-        // Показываем обновленные детали заказа
         await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
         break;
     }
@@ -1187,7 +1084,6 @@ async function handleAddProductStep(msg, userState) {
   }
 }
 
-// Основной обработчик callback-кнопок админского бота (ОБНОВЛЕННЫЙ)
 adminBot.on('callback_query', async (callbackQuery) => {
   const msg = callbackQuery.message;
   const data = callbackQuery.data;
@@ -1291,7 +1187,6 @@ adminBot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-// Обработка смены страницы заказов
 async function handleOrdersPage(msg, page, callbackQueryId) {
   try {
     const chatId = msg.chat.id;
@@ -1324,7 +1219,6 @@ async function handleOrdersPage(msg, page, callbackQueryId) {
       return;
     }
     
-    // Сохраняем текущую страницу
     orderPages[chatId] = parseInt(page);
     
     let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
@@ -1380,7 +1274,6 @@ async function handleOrdersPage(msg, page, callbackQueryId) {
   }
 }
 
-// Обработка отмены заказа
 async function handleCancelOrder(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const confirmKeyboard = {
@@ -1411,16 +1304,13 @@ async function handleCancelOrder(orderId, msg, callbackQueryId, returnPage = 1) 
   }
 }
 
-// Подтверждение отмены заказа
 async function handleConfirmCancelOrder(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
-    // Обновляем статус заказа
     await pool.query(
       'UPDATE orders SET status = $1 WHERE order_id = $2',
       ['canceled', orderId]
     );
     
-    // Получаем информацию о заказе
     const orderResult = await pool.query(
       'SELECT total, email FROM orders WHERE order_id = $1',
       [orderId]
@@ -1442,7 +1332,6 @@ async function handleConfirmCancelOrder(orderId, msg, callbackQueryId, returnPag
       show_alert: false
     });
     
-    // Через 2 секунды показываем обновленные детали заказа
     setTimeout(async () => {
       await showOrderDetails(msg.chat.id, msg.message_id, orderId, returnPage);
     }, 2000);
@@ -1455,7 +1344,6 @@ async function handleConfirmCancelOrder(orderId, msg, callbackQueryId, returnPag
   }
 }
 
-// Обработка оформления возврата
 async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const orderResult = await pool.query(
@@ -1509,7 +1397,6 @@ async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1
   }
 }
 
-// Подтверждение оформления возврата и запрос суммы
 async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const orderResult = await pool.query(
@@ -1528,7 +1415,6 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
     const order = orderResult.rows[0];
     const maxAmount = order.total;
     
-    // Сохраняем состояние для ввода суммы
     const chatId = msg.chat.id;
     userStates[chatId] = {
       action: 'process_refund',
@@ -1556,7 +1442,6 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
   }
 }
 
-// Остальные функции без изменений
 async function handleEditPriceList(msg, callbackQueryId) {
   try {
     const result = await pool.query(
@@ -1608,7 +1493,6 @@ async function handleEditPrice(productId, msg, callbackQueryId) {
     const product = productResult.rows[0];
     const chatId = msg.chat.id;
     
-    // Сохраняем состояние для изменения цены
     userStates[chatId] = {
       action: 'edit_price',
       step: 'awaiting_new_price',
@@ -1979,7 +1863,6 @@ async function handleDeleteProduct(productId, msg, callbackQueryId) {
   }
 }
 
-// ОБНОВЛЕННАЯ функция showOrderDetails с новыми кнопками
 async function showOrderDetails(chatId, messageId, orderId, returnPage = 1) {
   try {
     const result = await pool.query(
@@ -2029,33 +1912,28 @@ async function showOrderDetails(chatId, messageId, orderId, returnPage = 1) {
     
     let keyboardRows = [];
     
-    // ❌ Кнопка "Отменить заказ" - ВСЕГДА ЕСТЬ
     keyboardRows.push([
       { text: '❌ Отменить заказ', callback_data: `cancel_order:${orderId}:${returnPage}` }
     ]);
     
-    // ✅ Кнопка "Сделать готовым" - всегда есть, кроме уже completed
     if (order.status !== 'completed') {
       keyboardRows.push([
         { text: '✅ Сделать готовым', callback_data: `mark_completed:${orderId}` }
       ]);
     }
     
-    // 📝 Кнопка "Запросить код" - только для waiting_code_request статуса
     if (order.email && !order.code_requested && order.status !== 'completed' && !order.code && order.status === 'waiting_code_request') {
       keyboardRows.push([
         { text: '📝 Запросить код', callback_data: `request_code:${orderId}` }
       ]);
     }
     
-    // 💰 Кнопка "Оформить возврат" - новая кнопка (для всех статусов, кроме уже manyback)
     if (order.status !== 'manyback') {
       keyboardRows.push([
         { text: '💰 Оформить возврат', callback_data: `process_refund:${orderId}:${returnPage}` }
       ]);
     }
     
-    // Если есть код и статус waiting - кнопки для подтверждения
     if (order.code && order.status === 'waiting') {
       keyboardRows.push([
         { text: '✅ Подтвердить код', callback_data: `order_ready:${orderId}` },
@@ -2063,7 +1941,6 @@ async function showOrderDetails(chatId, messageId, orderId, returnPage = 1) {
       ]);
     }
     
-    // Кнопка возврата к списку заказов
     keyboardRows.push([
       { text: '⬅️ Назад к заказам', callback_data: `back_to_orders:${returnPage}` }
     ]);
@@ -2175,9 +2052,6 @@ async function handleBackToOrders(msg, page = 1) {
   }
 }
 
-// ===== API ДЛЯ АВТОРИЗАЦИИ (без изменений) =====
-
-// 1. Начать регистрацию (УПРОЩЕННАЯ ВЕРСИЯ - без запроса имени)
 app.post('/api/auth/start-register', async (req, res) => {
   try {
     const token = crypto.randomBytes(16).toString('hex');
@@ -2185,13 +2059,11 @@ app.post('/api/auth/start-register', async (req, res) => {
     try {
       const telegramLink = await generateBotLink('reg', token);
       
-      // Сохраняем сессию БЕЗ username - он будет получен из Telegram
       authSessions.set(token, {
         type: 'register',
         createdAt: Date.now()
       });
       
-      // Очищаем старые сессии (старше 10 минут)
       for (const [key, session] of authSessions.entries()) {
         if (Date.now() - session.createdAt > 10 * 60 * 1000) {
           authSessions.delete(key);
@@ -2217,7 +2089,6 @@ app.post('/api/auth/start-register', async (req, res) => {
   }
 });
 
-// 2. Начать вход
 app.post('/api/auth/start-login', async (req, res) => {
   try {
     const token = crypto.randomBytes(16).toString('hex');
@@ -2225,13 +2096,11 @@ app.post('/api/auth/start-login', async (req, res) => {
     try {
       const telegramLink = await generateBotLink('login', token);
       
-      // Сохраняем сессию
       authSessions.set(token, {
         type: 'login',
         createdAt: Date.now()
       });
       
-      // Очищаем старые сессии
       for (const [key, session] of authSessions.entries()) {
         if (Date.now() - session.createdAt > 10 * 60 * 1000) {
           authSessions.delete(key);
@@ -2257,7 +2126,6 @@ app.post('/api/auth/start-login', async (req, res) => {
   }
 });
 
-// 3. Проверить статус авторизации
 app.get('/api/auth/check/:token', async (req, res) => {
   try {
     const { token } = req.params;
@@ -2267,7 +2135,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
       const session = authSessions.get(authKey);
       
       if (session.type === 'auth_success') {
-        // Получаем полные данные пользователя из БД
         const userResult = await pool.query(
           'SELECT id, tg_id, username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
           [session.userId]
@@ -2283,7 +2150,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
         
         const user = userResult.rows[0];
         
-        // Удаляем сессию после проверки
         authSessions.delete(authKey);
         
         res.json({
@@ -2301,14 +2167,12 @@ app.get('/api/auth/check/:token', async (req, res) => {
         });
       }
     } else if (authSessions.has(token)) {
-      // Сессия еще не завершена
       res.json({
         success: true,
         authenticated: false,
         pending: true
       });
     } else {
-      // Токен не найден или истек
       res.json({
         success: true,
         authenticated: false,
@@ -2322,7 +2186,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
-// 4. Получить профиль пользователя (обновлено - возвращаем refund_amount)
 app.get('/api/auth/profile', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -2342,7 +2205,6 @@ app.get('/api/auth/profile', async (req, res) => {
     
     const user = userResult.rows[0];
     
-    // Получаем ВСЕ заказы пользователя, включая refund_amount
     const ordersResult = await pool.query(
       `SELECT order_id as id, total, status, payment_status, email, code, 
               code_requested, wrong_code_attempts, created_at as date, refund_amount
@@ -2352,7 +2214,6 @@ app.get('/api/auth/profile', async (req, res) => {
       [userId]
     );
     
-    // Преобразуем заказы для фронтенда
     const orders = ordersResult.rows.map(order => ({
       id: order.id,
       total: order.total,
@@ -2387,7 +2248,6 @@ app.get('/api/auth/profile', async (req, res) => {
   }
 });
 
-// 5. Выход из системы
 app.post('/api/auth/logout', async (req, res) => {
   try {
     res.json({
@@ -2400,7 +2260,6 @@ app.post('/api/auth/logout', async (req, res) => {
   }
 });
 
-// ===== ОБНОВЛЕННЫЙ СОЗДАНИЕ ЗАКАЗА =====
 app.post('/api/create-order', async (req, res) => {
   try {
     const { items, total, userId } = req.body;
@@ -2450,9 +2309,6 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// ===== ОСТАЛЬНЫЕ API (обновлены) =====
-
-// 6. Сохранение email
 app.post('/api/save-email', async (req, res) => {
   try {
     const { orderId, email } = req.body;
@@ -2478,7 +2334,6 @@ app.post('/api/save-email', async (req, res) => {
   }
 });
 
-// 7. Проверка запроса кода
 app.get('/api/check-code-request/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2505,7 +2360,6 @@ app.get('/api/check-code-request/:orderId', async (req, res) => {
   }
 });
 
-// 8. Проверка кода
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { orderId, code } = req.body;
@@ -2558,7 +2412,6 @@ app.post('/api/verify-code', async (req, res) => {
   }
 });
 
-// 9. Вебхук от Bilee Pay
 app.post('/api/bilee-webhook', async (req, res) => {
   try {
     const isValid = await validateSignature(req.body, BILEE_PASSWORD);
@@ -2593,7 +2446,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// 10. Проверка статуса заказа (обновлено)
 app.get('/api/order-status/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2628,7 +2480,6 @@ app.get('/api/order-status/:orderId', async (req, res) => {
   }
 });
 
-// 11. Получение списка товаров
 app.get('/api/products', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM products ORDER BY price');
@@ -2639,12 +2490,10 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-// 12. Получение деталей заказа (обновлено - возвращаем refund_amount)
 app.get('/api/order-details/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
     
-    // Получаем заказ из БД со ВСЕМИ полями
     const result = await pool.query(
       'SELECT * FROM orders WHERE order_id = $1',
       [orderId]
@@ -2656,7 +2505,6 @@ app.get('/api/order-details/:orderId', async (req, res) => {
     
     const order = result.rows[0];
     
-    // Форматируем данные с дополнительными полями
     const orderData = {
       id: order.order_id,
       date: order.created_at,
@@ -2682,7 +2530,6 @@ app.get('/api/order-details/:orderId', async (req, res) => {
   }
 });
 
-// 13. Определение этапа заказа (обновлено)
 app.get('/api/order-stage/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2707,20 +2554,16 @@ app.get('/api/order-stage/:orderId', async (req, res) => {
     let stage = '';
     let redirectUrl = '';
     
-    // Определяем этап
     if (status === 'manyback') {
       stage = 'refund_processed';
       redirectUrl = `moreorder.html?order=${orderId}`;
     } else if (!hasEmail && (status === 'new' || status === 'pending' || status === 'confirmed')) {
-      // Email еще не введен
       stage = 'email_required';
       redirectUrl = `success.html?order=${orderId}`;
     } else if (hasEmail && !codeRequested && status === 'waiting_code_request') {
-      // Email введен, ждем запроса кода
       stage = 'waiting_code_request';
       redirectUrl = `waiting_code.html?order=${orderId}`;
     } else if (codeRequested && !hasCode) {
-      // Код запрошен, нужно ввести
       if (wrongAttempts >= 2) {
         stage = 'support_needed';
         redirectUrl = `bad_enter_code.html?order=${orderId}`;
@@ -2729,19 +2572,15 @@ app.get('/api/order-stage/:orderId', async (req, res) => {
         redirectUrl = `code.html?order=${orderId}`;
       }
     } else if (hasCode && status === 'waiting') {
-      // Код введен, ждем выполнения
       stage = 'waiting_execution';
       redirectUrl = `waiting_order.html?order=${orderId}`;
     } else if (status === 'completed') {
-      // Заказ завершен
       stage = 'completed';
       redirectUrl = `ready.html?order=${orderId}`;
     } else if (status === 'canceled') {
-      // Заказ отменен
       stage = 'canceled';
       redirectUrl = `moreorder.html?order=${orderId}`;
     } else {
-      // Неизвестный этап
       stage = 'unknown';
       redirectUrl = `profile.html`;
     }
@@ -2767,7 +2606,6 @@ app.get('/api/order-stage/:orderId', async (req, res) => {
   }
 });
 
-// 14. API для отмены заказа (НОВЫЙ)
 app.post('/api/order/:orderId/cancel', async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2787,13 +2625,11 @@ app.post('/api/order/:orderId/cancel', async (req, res) => {
   }
 });
 
-// 15. API для оформления возврата (НОВЫЙ)
 app.post('/api/order/:orderId/refund', async (req, res) => {
   try {
     const { orderId } = req.params;
     const { amount } = req.body;
     
-    // Проверяем сумму возврата
     const orderResult = await pool.query(
       'SELECT total FROM orders WHERE order_id = $1',
       [orderId]
@@ -2842,8 +2678,6 @@ app.get('/api/firebase-config', (req, res) => {
   });
 });
 
-// ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-
 async function sendNewOrderNotification(orderId, total, email) {
   try {
     const result = await pool.query(
@@ -2880,7 +2714,6 @@ async function sendNewOrderNotification(orderId, total, email) {
   }
 }
 
-// ===== ЗАГРУЗКА ТЕСТОВЫХ ТОВАРОВ =====
 async function loadSampleProducts() {
   try {
     const sampleProducts = [
@@ -2917,7 +2750,6 @@ async function loadSampleProducts() {
   }
 }
 
-// ===== ЗАПУСК СЕРВЕРА =====
 async function startServer() {
   try {
     await initDB();
@@ -2939,7 +2771,6 @@ async function startServer() {
   }
 }
 
-// Обработчики завершения
 process.on('SIGTERM', () => {
   console.log('🛑 Получен SIGTERM, завершаем работу...');
   if (keepAliveInterval) clearInterval(keepAliveInterval);
