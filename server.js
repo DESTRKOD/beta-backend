@@ -766,7 +766,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -799,6 +799,167 @@ adminBot.onText(/\/setrate(?:\s+(\d+(?:\.\d+)?))?/, async (msg, match) => {
   } catch (error) {
     console.error('Ошибка установки курса:', error);
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при установке курса');
+  }
+});
+
+
+adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    if (!match[1] || !match[2]) {
+      adminBot.sendMessage(msg.chat.id, '❌ Укажите ID пользователя и сумму. Пример: /addbalance 123 500');
+      return;
+    }
+    
+    const userId = parseInt(match[1]);
+    const amount = parseInt(match[2]);
+    
+    if (isNaN(userId) || userId <= 0) {
+      adminBot.sendMessage(msg.chat.id, '❌ Некорректный ID пользователя');
+      return;
+    }
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(msg.chat.id, '❌ Сумма должна быть от 1 до 1 000 000');
+      return;
+    }
+    
+    const userResult = await pool.query(
+      'SELECT id, tg_id, username FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '❌ Пользователь с таким ID не найден');
+      return;
+    }
+    
+    const user = userResult.rows[0];
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      await client.query(
+        `INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) 
+         VALUES ($1, 0, 0, 0) 
+         ON CONFLICT (user_id) DO NOTHING`,
+        [user.id]
+      );
+      
+      await client.query(
+        'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
+        [amount, user.id]
+      );
+      
+      await client.query(
+        `INSERT INTO wallet_transactions 
+         (user_id, type, amount, description, metadata) 
+         VALUES ($1, 'deposit', $2, $3, $4)`,
+        [user.id, amount, `Пополнение баланса администратором`, JSON.stringify({ admin: true })]
+      );
+      
+      await client.query('COMMIT');
+      
+      const successText = `✅ Баланс пользователя пополнен!\n\n` +
+        `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
+        `🆔 ID: ${user.id}\n` +
+        `📱 TG ID: ${user.tg_id}\n` +
+        `💰 Сумма: ${formatRub(amount)}\n` +
+        `💎 Зачислено на DCoin баланс`;
+      
+      adminBot.sendMessage(msg.chat.id, successText);
+      
+      try {
+        await userBot.sendMessage(user.tg_id, 
+          `💰 Ваш баланс пополнен!\n\n` +
+          `💎 Сумма: ${formatRub(amount)} DCoin\n` +
+          `📌 Средства зачислены на доступный баланс.\n\n` +
+          `👉 Можете использовать их для покупок в магазине.`
+        );
+      } catch (notifyError) {
+        console.error('Ошибка уведомления пользователя:', notifyError);
+      }
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Ошибка пополнения баланса:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при пополнении баланса');
+  }
+});
+
+adminBot.onText(/\/debt(?:\s+(\d+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const userId = match[1] ? parseInt(match[1]) : null;
+    
+    let query;
+    let params = [];
+    
+    if (userId) {
+      query = `
+        SELECT user_id, 
+               SUM(ABS(amount)) as total_debt,
+               array_agg(DISTINCT order_id) as orders,
+               MAX(created_at) as last_debt
+        FROM wallet_transactions 
+        WHERE type = 'debt' AND user_id = $1
+        GROUP BY user_id
+      `;
+      params = [userId];
+    } else {
+      query = `
+        SELECT user_id, 
+               SUM(ABS(amount)) as total_debt,
+               array_agg(DISTINCT order_id) as orders,
+               MAX(created_at) as last_debt
+        FROM wallet_transactions 
+        WHERE type = 'debt'
+        GROUP BY user_id
+        ORDER BY MAX(created_at) DESC
+      `;
+    }
+    
+    const result = await pool.query(query, params);
+    
+    if (result.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '📭 Нет задолженностей');
+      return;
+    }
+    
+    let text = '📋 Задолженности пользователей:\n\n';
+    
+    for (const row of result.rows) {
+      const userResult = await pool.query(
+        'SELECT username, tg_id FROM users WHERE id = $1',
+        [row.user_id]
+      );
+      
+      const username = userResult.rows[0]?.username || `ID ${row.user_id}`;
+      const tgId = userResult.rows[0]?.tg_id || 'неизвестно';
+      
+      text += `👤 ${username}\n`;
+      text += `🆔 ID: ${row.user_id}\n`;
+      text += `📱 TG: ${tgId}\n`;
+      text += `💰 Долг: ${formatRub(Math.abs(row.total_debt))} DCoin\n`;
+      text += `📦 Заказы: ${row.orders?.length || 0}\n`;
+      text += `📅 Последний: ${new Date(row.last_debt).toLocaleDateString('ru-RU')}\n\n`;
+    }
+    
+    adminBot.sendMessage(msg.chat.id, text);
+    
+  } catch (error) {
+    console.error('Ошибка получения задолженностей:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении задолженностей');
   }
 });
 
@@ -1735,9 +1896,45 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     const refundAmount = order.refund_amount;
     const userId = order.user_id;
     
+    const walletResult = await client.query(
+      'SELECT available_balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId]
+    );
+    
+    let wallet = walletResult.rows[0];
+    let needToSpend = refundAmount;
+    let spentAmount = 0;
+    let rate = 1.0;
+    
+    const exchangeResult = await client.query(
+      `SELECT metadata FROM wallet_transactions 
+       WHERE user_id = $1 AND metadata->>'orderId' = $2 AND type = 'withdraw' AND metadata->>'spent' IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, orderId]
+    );
+    
+    if (exchangeResult.rows.length > 0) {
+      const exchangeTx = exchangeResult.rows[0];
+      if (exchangeTx.metadata && exchangeTx.metadata.rate) {
+        rate = parseFloat(exchangeTx.metadata.rate);
+        needToSpend = Math.ceil(refundAmount * rate);
+      }
+    }
+    
+    if (!wallet) {
+      await client.query(
+        'INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) VALUES ($1, 0, 0, 0)',
+        [userId]
+      );
+      wallet = { available_balance: 0 };
+    }
+    
+    const currentBalance = wallet.available_balance || 0;
+    const spendAmount = Math.min(needToSpend, currentBalance);
+    
     await client.query(
-      'UPDATE wallets SET frozen_balance = frozen_balance - $1 WHERE user_id = $2',
-      [refundAmount, userId]
+      'UPDATE wallets SET available_balance = available_balance - $1 WHERE user_id = $2',
+      [spendAmount, userId]
     );
     
     await client.query(
@@ -1749,16 +1946,47 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
       `INSERT INTO wallet_transactions 
        (user_id, type, amount, description, order_id, metadata) 
        VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
-      [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true, cancel_refund: true })]
+      [userId, -spendAmount, `Отмена возврата по заказу #${orderId}`, orderId, 
+       JSON.stringify({ 
+         cancel_refund: true, 
+         rate: rate,
+         original_refund: refundAmount,
+         spent: spendAmount,
+         remaining_debt: needToSpend - spendAmount
+       })]
     );
+    
+    if (spendAmount < needToSpend) {
+      await client.query(
+        `INSERT INTO wallet_transactions 
+         (user_id, type, amount, description, order_id, metadata) 
+         VALUES ($1, 'debt', $2, $3, $4, $5)`,
+        [userId, -(needToSpend - spendAmount), `Задолженность по отмене возврата #${orderId}`, orderId,
+         JSON.stringify({ 
+           debt: true,
+           rate: rate,
+           original_refund: refundAmount,
+           remaining: needToSpend - spendAmount
+         })]
+      );
+    }
     
     await client.query('COMMIT');
     
+    let debtText = '';
+    if (spendAmount < needToSpend) {
+      debtText = `\n\n⚠️ На балансе недостаточно средств!\n` +
+        `💰 Списано: ${formatRub(spendAmount)} DCoin\n` +
+        `📉 Задолженность: ${formatRub(needToSpend - spendAmount)} DCoin\n` +
+        `💳 При пополнении баланса задолженность будет списана автоматически.`;
+    }
+    
     const successText = `✅ Возврат отменен!\n\n` +
       `📦 Заказ: #${orderId}\n` +
-      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
-      `❄️ Средства списаны с замороженного баланса\n` +
-      `📊 Статус заказа: Завершен`;
+      `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
+      `💎 Курс обмена: 1 RUB = ${rate} DCoin\n` +
+      `💎 Списано с DCoin баланса: ${formatRub(spendAmount)} DCoin` +
+      debtText;
     
     await adminBot.editMessageText(successText, {
       chat_id: msg.chat.id,
@@ -1774,17 +2002,26 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
       if (userResult.rows.length > 0) {
         const userTgId = userResult.rows[0].tg_id;
         
-        await userBot.sendMessage(userTgId, 
-          `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
-          `💰 Сумма ${formatRub(refundAmount)} списана с вашего замороженного баланса.`
-        );
+        let userMessage = `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
+          `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
+          `💎 Курс обмена: 1 RUB = ${rate} DCoin\n` +
+          `💎 Списано с вашего DCoin баланса: ${formatRub(spendAmount)} DCoin`;
+        
+        if (spendAmount < needToSpend) {
+          userMessage += `\n\n⚠️ На вашем балансе недостаточно средств!\n` +
+            `💰 Списано: ${formatRub(spendAmount)} DCoin\n` +
+            `📉 Задолженность: ${formatRub(needToSpend - spendAmount)} DCoin\n` +
+            `💳 При следующем пополнении баланса задолженность будет списана автоматически.`;
+        }
+        
+        await userBot.sendMessage(userTgId, userMessage);
       }
     } catch (notifyError) {
       console.error('Ошибка уведомления пользователя:', notifyError);
     }
     
     await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Возврат отменен',
+      text: spendAmount < needToSpend ? '⚠️ Возврат отменен, но есть задолженность' : '✅ Возврат отменен',
       show_alert: false
     });
     
