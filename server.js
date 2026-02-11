@@ -235,6 +235,37 @@ async function initDB() {
       )
     `);
 
+    // Таблица курса обмена
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS exchange_rate (
+    id SERIAL PRIMARY KEY,
+    rate DECIMAL(10,2) NOT NULL DEFAULT 1.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// Добавляем поля в wallets
+try {
+  await pool.query(`
+    ALTER TABLE wallets 
+    ADD COLUMN IF NOT EXISTS frozen_balance INTEGER DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS available_balance INTEGER DEFAULT 0
+  `);
+} catch (e) {
+  console.log('Колонки уже существуют:', e.message);
+}
+
+// Добавляем metadata в wallet_transactions
+try {
+  await pool.query(`
+    ALTER TABLE wallet_transactions 
+    ADD COLUMN IF NOT EXISTS metadata JSONB
+  `);
+} catch (e) {
+  console.log('Колонка metadata уже существует:', e.message);
+}
+
     // Индексы
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
@@ -770,6 +801,54 @@ adminBot.onText(/\/start/, async (msg) => {
   
   const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
+});
+
+adminBot.onText(/\/setrate (\d+(?:\.\d+)?)/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const rate = parseFloat(match[1]);
+    
+    if (isNaN(rate) || rate <= 0) {
+      adminBot.sendMessage(msg.chat.id, '❌ Введите корректный курс (положительное число)');
+      return;
+    }
+    
+    await pool.query(
+      'INSERT INTO exchange_rate (rate) VALUES ($1)',
+      [rate]
+    );
+    
+    adminBot.sendMessage(
+      msg.chat.id, 
+      `✅ Курс обмена установлен: 1 RUB = ${rate} IMGRU`
+    );
+    
+  } catch (error) {
+    console.error('Ошибка установки курса:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при установке курса');
+  }
+});
+
+adminBot.onText(/\/rate/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query(
+      'SELECT rate FROM exchange_rate ORDER BY created_at DESC LIMIT 1'
+    );
+    
+    const rate = result.rows[0]?.rate || 1.0;
+    
+    adminBot.sendMessage(
+      msg.chat.id,
+      `📊 Текущий курс обмена:\n1 RUB = ${rate} IMGRU`
+    );
+    
+  } catch (error) {
+    console.error('Ошибка получения курса:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении курса');
+  }
 });
 
 adminBot.onText(/\/stats/, async (msg) => {
@@ -2372,6 +2451,156 @@ app.get('/api/wallet/:userId', async (req, res) => {
     res.json({
       success: true,
       balance: walletResult.rows[0]?.balance || 0,
+      transactions: transactionsResult.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения кошелька:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+// Таблица курса обмена
+app.get('/api/exchange/rate', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT rate FROM exchange_rate ORDER BY updated_at DESC LIMIT 1'
+    );
+    
+    const rate = result.rows[0]?.rate || 1.0;
+    
+    res.json({
+      success: true,
+      rate: rate
+    });
+  } catch (error) {
+    console.error('Ошибка получения курса:', error);
+    res.json({ success: true, rate: 1.0 });
+  }
+});
+
+// Установка курса (для админ-бота)
+app.post('/api/exchange/rate', async (req, res) => {
+  try {
+    const { rate } = req.body;
+    
+    await pool.query(
+      'INSERT INTO exchange_rate (rate) VALUES ($1)',
+      [rate]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка установки курса:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Обмен валют
+app.post('/api/exchange/swap', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { userId, amount, rate } = req.body;
+    
+    await client.query('BEGIN');
+    
+    // Получаем текущие балансы
+    const walletResult = await client.query(
+      'SELECT frozen_balance, available_balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId]
+    );
+    
+    let wallet = walletResult.rows[0];
+    
+    if (!wallet) {
+      await client.query(
+        'INSERT INTO wallets (user_id, frozen_balance, available_balance) VALUES ($1, 0, 0)',
+        [userId]
+      );
+      wallet = { frozen_balance: 0, available_balance: 0 };
+    }
+    
+    // Проверяем достаточно ли средств
+    if (wallet.frozen_balance < amount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Недостаточно замороженных средств' 
+      });
+    }
+    
+    const receivedAmount = amount * rate;
+    
+    // Обновляем балансы
+    await client.query(
+      'UPDATE wallets SET frozen_balance = frozen_balance - $1, available_balance = available_balance + $2 WHERE user_id = $3',
+      [amount, receivedAmount, userId]
+    );
+    
+    // Записываем транзакцию
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, metadata) 
+       VALUES ($1, 'withdraw', $2, $3, $4)`,
+      [userId, -amount, `Обмен на IMGRU`, JSON.stringify({ rate, received: receivedAmount })]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, metadata) 
+       VALUES ($1, 'deposit', $2, $3, $4)`,
+      [userId, receivedAmount, `Получено от обмена`, JSON.stringify({ rate, spent: amount })]
+    );
+    
+    await client.query('COMMIT');
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Ошибка обмена:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// Обновленный GET /api/wallet/:userId
+app.get('/api/wallet/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Создаем кошелек если нет
+    await pool.query(
+      `INSERT INTO wallets (user_id, frozen_balance, available_balance) 
+       VALUES ($1, 0, 0) 
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+    
+    const walletResult = await pool.query(
+      'SELECT balance, frozen_balance, available_balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    
+    const wallet = walletResult.rows[0];
+    
+    const transactionsResult = await pool.query(
+      `SELECT id, type, amount, description as title, order_id as "orderId", created_at as date, metadata
+       FROM wallet_transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 100`,
+      [userId]
+    );
+    
+    res.json({
+      success: true,
+      balance: wallet?.balance || 0,
+      frozenBalance: wallet?.frozen_balance || 0,
+      availableBalance: wallet?.available_balance || 0,
       transactions: transactionsResult.rows
     });
     
