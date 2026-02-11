@@ -89,6 +89,7 @@ const orderPages = {};
 
 async function initDB() {
   try {
+    // Таблица пользователей
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -103,6 +104,7 @@ async function initDB() {
       )
     `);
 
+    // Добавляем недостающие колонки в users
     const columnsToAdd = [
       { name: 'first_name', type: 'VARCHAR(100)' },
       { name: 'last_name', type: 'VARCHAR(100)' },
@@ -117,9 +119,11 @@ async function initDB() {
           ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
         `);
       } catch (e) {
+        console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
       }
     }
 
+    // Таблица заказов
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -137,31 +141,7 @@ async function initDB() {
       )
     `);
 
-    -- Таблица кошельков
-CREATE TABLE IF NOT EXISTS wallets (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-  balance INTEGER DEFAULT 0,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Таблица транзакций
-CREATE TABLE IF NOT EXISTS wallet_transactions (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-  type VARCHAR(20) NOT NULL, -- 'deposit' или 'withdraw'
-  amount INTEGER NOT NULL,
-  description TEXT,
-  order_id VARCHAR(50),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Индексы
-CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
-CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id);
-CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactions(order_id);
-
+    // Добавляем недостающие колонки в orders
     const ordersColumnsToAdd = [
       { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
       { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
@@ -176,9 +156,74 @@ CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactio
           ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
         `);
       } catch (e) {
+        console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
       }
     }
 
+    // ТАБЛИЦА КОШЕЛЬКОВ
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wallets (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+        balance INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Добавляем индексы для wallets
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id)');
+    } catch (e) {
+      console.log('Индекс idx_wallets_user_id уже существует:', e.message);
+    }
+
+    // ТАБЛИЦА ТРАНЗАКЦИЙ КОШЕЛЬКА
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wallet_transactions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(20) NOT NULL,
+        amount INTEGER NOT NULL,
+        description TEXT,
+        order_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Добавляем индексы для wallet_transactions
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactions(order_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_created_at ON wallet_transactions(created_at DESC)');
+    } catch (e) {
+      console.log('Индексы wallet_transactions уже существуют:', e.message);
+    }
+
+    // Триггер для автоматического обновления updated_at в wallets
+    try {
+      await pool.query(`
+        CREATE OR REPLACE FUNCTION update_wallet_timestamp()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          NEW.updated_at = CURRENT_TIMESTAMP;
+          RETURN NEW;
+        END;
+        $$ language 'plpgsql';
+      `);
+
+      await pool.query(`
+        DROP TRIGGER IF EXISTS update_wallet_timestamp ON wallets;
+        CREATE TRIGGER update_wallet_timestamp
+          BEFORE UPDATE ON wallets
+          FOR EACH ROW
+          EXECUTE FUNCTION update_wallet_timestamp();
+      `);
+    } catch (e) {
+      console.log('Ошибка создания триггера для wallets:', e.message);
+    }
+
+    // Таблица товаров
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id VARCHAR(50) PRIMARY KEY,
@@ -190,16 +235,26 @@ CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactio
       )
     `);
 
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
-    await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
+    // Индексы
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC)');
+    } catch (e) {
+      console.log('Индексы уже существуют:', e.message);
+    }
 
     console.log('✅ База данных инициализирована');
+    console.log('📊 Таблицы: users, orders, products, wallets, wallet_transactions');
+
   } catch (error) {
     console.error('❌ Ошибка инициализации БД:', error);
+    throw error;
   }
 }
+
 
 app.get('/health', (req, res) => {
   res.json({
