@@ -1344,6 +1344,9 @@ adminBot.on('callback_query', async (callbackQuery) => {
       case 'request_code':
         await handleRequestCode(params[0], msg, callbackQuery.id);
         break;
+      case 'cancel_refund':
+        await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
+        break;
       case 'order_ready':
         await handleOrderReady(params[0], msg, callbackQuery.id);
         break;
@@ -1412,6 +1415,166 @@ adminBot.on('callback_query', async (callbackQuery) => {
     });
   }
 });
+
+async function handleCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
+  try {
+    const orderResult = await pool.query(
+      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2',
+      [orderId, 'manyback']
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Возврат не найден или уже отменен',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    const refundAmount = order.refund_amount;
+    const userId = order.user_id;
+    
+    if (!userId) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ К заказу не привязан пользователь',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Да, отменить возврат', callback_data: `confirm_cancel_refund:${orderId}:${returnPage}` },
+          { text: '❌ Нет', callback_data: `order_detail:${orderId}:${returnPage}` }
+        ]
+      ]
+    };
+    
+    await adminBot.editMessageText(`⚠️ Отмена возврата для заказа #${orderId}\n\n` +
+      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+      `👤 Пользователь ID: ${userId}\n\n` +
+      `❄️ Средства будут списаны с замороженного баланса.\n` +
+      `💰 Баланс пользователя может уйти в минус, если средств недостаточно.\n\n` +
+      `Вы уверены?`, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: confirmKeyboard
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: 'Подтвердите отмену возврата',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка отмены возврата:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    const orderResult = await client.query(
+      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
+      [orderId, 'manyback']
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Возврат не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    const refundAmount = order.refund_amount;
+    const userId = order.user_id;
+    
+    await client.query(
+      'UPDATE wallets SET frozen_balance = frozen_balance - $1 WHERE user_id = $2',
+      [refundAmount, userId]
+    );
+    
+    await client.query(
+      'UPDATE orders SET status = $1, refund_amount = NULL WHERE order_id = $2',
+      ['completed', orderId]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, order_id, metadata) 
+       VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
+      [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true, cancel_refund: true })]
+    );
+    
+    await client.query('COMMIT');
+    
+    const successText = `✅ Возврат отменен!\n\n` +
+      `📦 Заказ: #${orderId}\n` +
+      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+      `❄️ Средства списаны с замороженного баланса\n` +
+      `📊 Статус заказа: Завершен`;
+    
+    await adminBot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    try {
+      const userResult = await client.query(
+        'SELECT tg_id FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      if (userResult.rows.length > 0) {
+        const userTgId = userResult.rows[0].tg_id;
+        
+        await userBot.sendMessage(userTgId, 
+          `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
+          `💰 Сумма ${formatRub(refundAmount)} списана с вашего замороженного баланса.`
+        );
+      }
+    } catch (notifyError) {
+      console.error('Ошибка уведомления пользователя:', notifyError);
+    }
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Возврат отменен',
+      show_alert: false
+    });
+    
+    setTimeout(async () => {
+      await showOrderDetails(msg.chat.id, msg.message_id, orderId, returnPage);
+    }, 2000);
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Ошибка подтверждения отмены возврата:', error);
+    
+    await adminBot.editMessageText('❌ Ошибка при отмене возврата. Баланс пользователя не изменен.', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  } finally {
+    client.release();
+  }
+}
 
 async function handleOrdersPage(msg, page, callbackQueryId) {
   try {
@@ -1676,6 +1839,104 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
       text: '❌ Ошибка',
       show_alert: true 
     });
+  }
+}
+
+async function handleRefundStep(msg, userState) {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  try {
+    switch(userState.step) {
+      case 'awaiting_refund_amount':
+        const refundAmount = parseInt(text);
+        const maxAmount = userState.orderTotal;
+        
+        if (isNaN(refundAmount) || refundAmount <= 0 || refundAmount > maxAmount) {
+          adminBot.sendMessage(chatId, `❌ Сумма должна быть числом от 1 до ${maxAmount}. Введите сумму еще раз:`);
+          return;
+        }
+        
+        const orderId = userState.orderId;
+        const userId = userState.userId;
+        
+        const client = await pool.connect();
+        
+        try {
+          await client.query('BEGIN');
+          
+          await client.query(
+            'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
+            ['manyback', refundAmount, orderId]
+          );
+          
+          await client.query(
+            `INSERT INTO wallets (user_id, frozen_balance, balance, available_balance) 
+             VALUES ($1, 0, 0, 0) 
+             ON CONFLICT (user_id) DO NOTHING`,
+            [userId]
+          );
+          
+          await client.query(
+            'UPDATE wallets SET frozen_balance = frozen_balance + $1 WHERE user_id = $2',
+            [refundAmount, userId]
+          );
+          
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, order_id, metadata) 
+             VALUES ($1, 'refund', $2, $3, $4, $5)`,
+            [userId, refundAmount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true })]
+          );
+          
+          await client.query('COMMIT');
+          
+          const successText = `✅ Возврат оформлен!\n\n` +
+            `📦 Заказ: #${orderId}\n` +
+            `💰 Сумма заказа: ${formatRub(maxAmount)}\n` +
+            `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+            `❄️ Средства заморожены на кошельке пользователя`;
+          
+          delete userStates[chatId];
+          
+          adminBot.sendMessage(chatId, successText);
+          
+          try {
+            const userResult = await client.query(
+              'SELECT tg_id FROM users WHERE id = $1',
+              [userId]
+            );
+            
+            if (userResult.rows.length > 0) {
+              const userTgId = userResult.rows[0].tg_id;
+              
+              await userBot.sendMessage(userTgId, 
+                `💰 Вам начислен возврат!\n\n` +
+                `📦 Заказ: #${orderId}\n` +
+                `💰 Сумма: ${formatRub(refundAmount)}\n\n` +
+                `❄️ Средства заморожены.\n` +
+                `👉 Перейдите в "Кошелёк" → "Разморозить деньги", чтобы обменять их на DCoin.`
+              );
+            }
+          } catch (notifyError) {
+            console.error('Ошибка уведомления пользователя:', notifyError);
+          }
+          
+          await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
+          
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+        
+        break;
+    }
+  } catch (error) {
+    console.error('❌ Ошибка оформления возврата:', error);
+    adminBot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново.');
+    delete userStates[chatId];
   }
 }
 
@@ -2270,6 +2531,12 @@ async function showOrderDetails(chatId, messageId, orderId, returnPage = 1) {
     if (order.status !== 'manyback') {
       keyboardRows.push([
         { text: '💰 Оформить возврат', callback_data: `process_refund:${orderId}:${returnPage}` }
+      ]);
+    }
+
+    if (order.status === 'manyback' && order.refund_amount > 0) {
+      keyboardRows.push([
+        { text: '↩️ Отменить возврат', callback_data: `cancel_refund:${orderId}:${returnPage}` }
       ]);
     }
     
