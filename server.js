@@ -137,6 +137,31 @@ async function initDB() {
       )
     `);
 
+    -- Таблица кошельков
+CREATE TABLE IF NOT EXISTS wallets (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+  balance INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Таблица транзакций
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  type VARCHAR(20) NOT NULL, -- 'deposit' или 'withdraw'
+  amount INTEGER NOT NULL,
+  description TEXT,
+  order_id VARCHAR(50),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Индексы
+CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactions(order_id);
+
     const ordersColumnsToAdd = [
       { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
       { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
@@ -2122,6 +2147,181 @@ app.post('/api/auth/start-login', async (req, res) => {
     }
   } catch (error) {
     console.error('Ошибка начала входа:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+
+// ПОЛУЧИТЬ данные кошелька пользователя
+app.get('/api/wallet/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Проверяем существование пользователя
+    const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    // Получаем баланс и транзакции кошелька
+    const walletResult = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    
+    // Если кошелька нет - создаем
+    if (walletResult.rows.length === 0) {
+      await pool.query(
+        'INSERT INTO wallets (user_id, balance) VALUES ($1, 0)',
+        [userId]
+      );
+    }
+    
+    // Получаем историю транзакций
+    const transactionsResult = await pool.query(
+      `SELECT id, type, amount, description as title, order_id as "orderId", created_at as date
+       FROM wallet_transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 50`,
+      [userId]
+    );
+    
+    // Получаем текущий баланс
+    const currentWallet = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    
+    res.json({
+      success: true,
+      balance: currentWallet.rows[0]?.balance || 0,
+      transactions: transactionsResult.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения кошелька:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ПОПОЛНИТЬ кошелек (например, при возврате)
+app.post('/api/wallet/deposit', async (req, res) => {
+  try {
+    const { userId, amount, orderId, description } = req.body;
+    
+    // Начинаем транзакцию
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Создаем кошелек если нет
+      await client.query(
+        `INSERT INTO wallets (user_id, balance) 
+         VALUES ($1, 0) 
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId]
+      );
+      
+      // Обновляем баланс
+      await client.query(
+        'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
+        [amount, userId]
+      );
+      
+      // Записываем транзакцию
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id) 
+         VALUES ($1, 'deposit', $2, $3, $4)`,
+        [userId, amount, description || 'Пополнение кошелька', orderId]
+      );
+      
+      await client.query('COMMIT');
+      
+      res.json({ success: true });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Ошибка пополнения кошелька:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ПРИ ОФОРМЛЕНИИ ВОЗВРАТА
+app.post('/api/orders/refund', async (req, res) => {
+  try {
+    const { orderId, amount } = req.body;
+    
+    // Получаем user_id из заказа
+    const orderResult = await pool.query(
+      'SELECT user_id FROM orders WHERE order_id = $1',
+      [orderId]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Order not found' });
+    }
+    
+    const userId = orderResult.rows[0].user_id;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User not linked to order' });
+    }
+    
+    // Пополняем кошелек
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Создаем кошелек если нет
+      await client.query(
+        `INSERT INTO wallets (user_id, balance) 
+         VALUES ($1, 0) 
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId]
+      );
+      
+      // Начисляем средства
+      await client.query(
+        'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
+        [amount, userId]
+      );
+      
+      // Записываем транзакцию
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id) 
+         VALUES ($1, 'deposit', $2, $3, $4)`,
+        [userId, amount, `Возврат по заказу #${orderId}`, orderId]
+      );
+      
+      // Обновляем статус заказа
+      await client.query(
+        'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
+        ['manyback', amount, orderId]
+      );
+      
+      await client.query('COMMIT');
+      
+      res.json({ success: true });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    
+  } catch (error) {
+    console.error('Ошибка оформления возврата:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
