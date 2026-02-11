@@ -770,10 +770,15 @@ adminBot.onText(/\/start/, async (msg) => {
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
-adminBot.onText(/\/setrate\s+(\d+(?:\.\d+)?)/, async (msg, match) => {
+adminBot.onText(/\/setrate(?:\s+(\d+(?:\.\d+)?))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
   try {
+    if (!match[1]) {
+      adminBot.sendMessage(msg.chat.id, '❌ Укажите курс. Пример: /setrate 1.5');
+      return;
+    }
+    
     const rate = parseFloat(match[1]);
     
     if (isNaN(rate) || rate <= 0) {
@@ -817,6 +822,7 @@ adminBot.onText(/\/rate/, async (msg) => {
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении курса');
   }
 });
+
 
 adminBot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
