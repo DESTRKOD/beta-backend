@@ -849,36 +849,121 @@ adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
         [user.id]
       );
       
-      await client.query(
-        'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
-        [amount, user.id]
+      const debtResult = await client.query(
+        `SELECT SUM(ABS(amount)) as total_debt 
+         FROM wallet_transactions 
+         WHERE user_id = $1 AND type = 'debt'`,
+        [user.id]
       );
       
-      await client.query(
-        `INSERT INTO wallet_transactions 
-         (user_id, type, amount, description, metadata) 
-         VALUES ($1, 'deposit', $2, $3, $4)`,
-        [user.id, amount, `Пополнение баланса администратором`, JSON.stringify({ admin: true })]
-      );
+      const totalDebt = debtResult.rows[0]?.total_debt || 0;
+      
+      let remainingAmount = amount;
+      let debtPaid = 0;
+      
+      if (totalDebt > 0) {
+        const debtTransactions = await client.query(
+          `SELECT id, amount, order_id, metadata 
+           FROM wallet_transactions 
+           WHERE user_id = $1 AND type = 'debt'
+           ORDER BY created_at ASC`,
+          [user.id]
+        );
+        
+        for (const debt of debtTransactions.rows) {
+          if (remainingAmount <= 0) break;
+          
+          const debtAmount = Math.abs(debt.amount);
+          const payAmount = Math.min(debtAmount, remainingAmount);
+          
+          await client.query(
+            `UPDATE wallet_transactions 
+             SET amount = amount + $1, 
+                 metadata = jsonb_set(
+                   COALESCE(metadata, '{}'), 
+                   '{paid}', 
+                   to_jsonb(COALESCE((metadata->>'paid')::int, 0) + $2)
+                 )
+             WHERE id = $3`,
+            [payAmount, payAmount, debt.id]
+          );
+          
+          if (payAmount >= debtAmount) {
+            await client.query(
+              `UPDATE wallet_transactions 
+               SET type = 'debt_paid',
+                   metadata = metadata || '{"fully_paid": true}'
+               WHERE id = $1`,
+              [debt.id]
+            );
+          }
+          
+          debtPaid += payAmount;
+          remainingAmount -= payAmount;
+        }
+        
+        if (debtPaid > 0) {
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, metadata) 
+             VALUES ($1, 'debt_payment', $2, $3, $4)`,
+            [user.id, -debtPaid, `Автоматическое погашение задолженности`, 
+             JSON.stringify({ auto_paid: true, amount: debtPaid })]
+          );
+        }
+      }
+      
+      if (remainingAmount > 0) {
+        await client.query(
+          'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
+          [remainingAmount, user.id]
+        );
+        
+        await client.query(
+          `INSERT INTO wallet_transactions 
+           (user_id, type, amount, description, metadata) 
+           VALUES ($1, 'deposit', $2, $3, $4)`,
+          [user.id, remainingAmount, `Пополнение баланса администратором`, 
+           JSON.stringify({ admin: true, after_debt: true })]
+        );
+      }
       
       await client.query('COMMIT');
       
-      const successText = `✅ Баланс пользователя пополнен!\n\n` +
+      let successText = `✅ Баланс пользователя пополнен!\n\n` +
         `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
         `🆔 ID: ${user.id}\n` +
         `📱 TG ID: ${user.tg_id}\n` +
-        `💰 Сумма: ${formatRub(amount)}\n` +
-        `💎 Зачислено на DCoin баланс`;
+        `💰 Сумма пополнения: ${formatRub(amount)}\n`;
+      
+      if (debtPaid > 0) {
+        successText += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+      }
+      
+      if (remainingAmount > 0) {
+        successText += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n`;
+      } else {
+        successText += `⚠️ Вся сумма ушла на погашение задолженности\n`;
+      }
       
       adminBot.sendMessage(msg.chat.id, successText);
       
       try {
-        await userBot.sendMessage(user.tg_id, 
-          `💰 Ваш баланс пополнен!\n\n` +
-          `💎 Сумма: ${formatRub(amount)} DCoin\n` +
-          `📌 Средства зачислены на доступный баланс.\n\n` +
-          `👉 Можете использовать их для покупок в магазине.`
-        );
+        let userMessage = `💰 Ваш баланс пополнен!\n\n`;
+        
+        if (debtPaid > 0) {
+          userMessage += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+        }
+        
+        if (remainingAmount > 0) {
+          userMessage += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n\n`;
+        } else {
+          userMessage += `⚠️ Вся сумма ушла на погашение задолженности\n\n`;
+        }
+        
+        userMessage += `👉 Проверьте свой баланс в разделе "Кошелёк"`;
+        
+        await userBot.sendMessage(user.tg_id, userMessage);
       } catch (notifyError) {
         console.error('Ошибка уведомления пользователя:', notifyError);
       }
@@ -2780,6 +2865,30 @@ app.get('/api/wallet/:userId', async (req, res) => {
   } catch (error) {
     console.error('Ошибка получения кошелька:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/user/debt/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const result = await pool.query(
+      `SELECT SUM(ABS(amount)) as total_debt 
+       FROM wallet_transactions 
+       WHERE user_id = $1 AND type = 'debt'`,
+      [userId]
+    );
+    
+    const debt = result.rows[0]?.total_debt || 0;
+    
+    res.json({
+      success: true,
+      debt: debt
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения задолженности:', error);
+    res.json({ success: true, debt: 0 });
   }
 });
 
