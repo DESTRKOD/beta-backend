@@ -1082,19 +1082,86 @@ async function handleRefundStep(msg, userState) {
         }
         
         const orderId = userState.orderId;
+        const userId = userState.userId;
         
-        await pool.query(
-          'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
-          ['manyback', refundAmount, orderId]
-        );
+        // Начинаем транзакцию
+        const client = await pool.connect();
         
-        const successText = `✅ Возврат оформлен!\n\n📦 Заказ: #${orderId}\n💰 Сумма заказа: ${formatRub(maxAmount)}\n💰 Сумма возврата: ${formatRub(refundAmount)}\n\nСтатус заказа изменен на "Оформлен возврат".`;
+        try {
+          await client.query('BEGIN');
+          
+          // 1. Обновляем статус заказа
+          await client.query(
+            'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
+            ['manyback', refundAmount, orderId]
+          );
+          
+          // 2. Создаем кошелек если нет
+          await client.query(
+            `INSERT INTO wallets (user_id, balance) 
+             VALUES ($1, 0) 
+             ON CONFLICT (user_id) DO NOTHING`,
+            [userId]
+          );
+          
+          // 3. Начисляем деньги на кошелек
+          await client.query(
+            'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
+            [refundAmount, userId]
+          );
+          
+          // 4. Записываем транзакцию
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, order_id) 
+             VALUES ($1, 'deposit', $2, $3, $4)`,
+            [userId, refundAmount, `Возврат по заказу #${orderId}`, orderId]
+          );
+          
+          await client.query('COMMIT');
+          
+          const successText = `✅ Возврат оформлен!\n\n` +
+            `📦 Заказ: #${orderId}\n` +
+            `💰 Сумма заказа: ${formatRub(maxAmount)}\n` +
+            `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+            `👤 Пользователю начислено ${formatRub(refundAmount)} на кошелек\n\n` +
+            `Статус заказа изменен на "Оформлен возврат".`;
+          
+          delete userStates[chatId];
+          
+          adminBot.sendMessage(chatId, successText);
+          
+          // Отправляем уведомление пользователю
+          try {
+            const userResult = await client.query(
+              'SELECT tg_id FROM users WHERE id = $1',
+              [userId]
+            );
+            
+            if (userResult.rows.length > 0) {
+              const userTgId = userResult.rows[0].tg_id;
+              
+              await userBot.sendMessage(userTgId, 
+                `💰 Вам начислен возврат!\n\n` +
+                `📦 Заказ: #${orderId}\n` +
+                `💰 Сумма: ${formatRub(refundAmount)}\n\n` +
+                `Средства зачислены на ваш кошелек в магазине.\n` +
+                `Вы можете проверить баланс в разделе "Кошелёк".`
+              );
+            }
+          } catch (notifyError) {
+            console.error('Ошибка уведомления пользователя:', notifyError);
+          }
+          
+          await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
+          
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
         
-        delete userStates[chatId];
-        
-        adminBot.sendMessage(chatId, successText);
-        
-        await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
         break;
     }
   } catch (error) {
@@ -1480,7 +1547,7 @@ async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1
 async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const orderResult = await pool.query(
-      'SELECT total FROM orders WHERE order_id = $1',
+      'SELECT total, user_id FROM orders WHERE order_id = $1',
       [orderId]
     );
     
@@ -1494,12 +1561,22 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
     
     const order = orderResult.rows[0];
     const maxAmount = order.total;
+    const userId = order.user_id;
+    
+    if (!userId) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ К заказу не привязан пользователь',
+        show_alert: true 
+      });
+      return;
+    }
     
     const chatId = msg.chat.id;
     userStates[chatId] = {
       action: 'process_refund',
       step: 'awaiting_refund_amount',
       orderId: orderId,
+      userId: userId,
       orderTotal: maxAmount,
       returnPage: parseInt(returnPage)
     };
@@ -2252,6 +2329,49 @@ app.get('/api/wallet/:userId', async (req, res) => {
     res.json({
       success: true,
       balance: currentWallet.rows[0]?.balance || 0,
+      transactions: transactionsResult.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения кошелька:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/wallet/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    // Создаем кошелек если нет
+    await pool.query(
+      `INSERT INTO wallets (user_id, balance) 
+       VALUES ($1, 0) 
+       ON CONFLICT (user_id) DO NOTHING`,
+      [userId]
+    );
+    
+    const walletResult = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    
+    const transactionsResult = await pool.query(
+      `SELECT id, type, amount, description as title, order_id as "orderId", created_at as date
+       FROM wallet_transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 100`,
+      [userId]
+    );
+    
+    res.json({
+      success: true,
+      balance: walletResult.rows[0]?.balance || 0,
       transactions: transactionsResult.rows
     });
     
