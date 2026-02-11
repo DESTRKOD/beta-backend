@@ -237,6 +237,85 @@ async function initDB() {
       )
     `);
 
+
+    // Триггер для автоматического списания долга при пополнении баланса
+await pool.query(`
+  CREATE OR REPLACE FUNCTION auto_pay_debt()
+  RETURNS TRIGGER AS $$
+  DECLARE
+    total_debt INTEGER;
+    pay_amount INTEGER;
+    debt_record RECORD;
+  BEGIN
+    IF NEW.available_balance > OLD.available_balance THEN
+      SELECT SUM(ABS(amount)) INTO total_debt
+      FROM wallet_transactions
+      WHERE user_id = NEW.user_id AND type = 'debt';
+      
+      total_debt := COALESCE(total_debt, 0);
+      
+      IF total_debt > 0 AND NEW.available_balance > 0 THEN
+        pay_amount := LEAST(NEW.available_balance, total_debt);
+        
+        FOR debt_record IN 
+          SELECT id, amount, order_id, metadata
+          FROM wallet_transactions
+          WHERE user_id = NEW.user_id AND type = 'debt'
+          ORDER BY created_at ASC
+        LOOP
+          EXIT WHEN pay_amount <= 0;
+          
+          DECLARE
+            debt_amount INTEGER := ABS(debt_record.amount);
+            debt_pay INTEGER := LEAST(debt_amount, pay_amount);
+          BEGIN
+            UPDATE wallet_transactions
+            SET amount = amount + debt_pay,
+                metadata = jsonb_set(
+                  COALESCE(metadata, '{}'),
+                  '{paid}',
+                  to_jsonb(COALESCE((metadata->>'paid')::int, 0) + debt_pay)
+                )
+            WHERE id = debt_record.id;
+            
+            IF debt_pay >= debt_amount THEN
+              UPDATE wallet_transactions
+              SET type = 'debt_paid',
+                  metadata = metadata || '{"fully_paid": true}'
+              WHERE id = debt_record.id;
+            END IF;
+            
+            pay_amount := pay_amount - debt_pay;
+          END;
+        END LOOP;
+        
+        INSERT INTO wallet_transactions
+        (user_id, type, amount, description, metadata)
+        VALUES (
+          NEW.user_id,
+          'debt_payment',
+          -LEAST(NEW.available_balance - NEW.available_balance + pay_amount, total_debt),
+          'Автоматическое погашение задолженности',
+          jsonb_build_object('auto_paid', true)
+        );
+        
+        NEW.available_balance := NEW.available_balance - LEAST(total_debt, OLD.available_balance + (NEW.available_balance - OLD.available_balance));
+      END IF;
+    END IF;
+    
+    RETURN NEW;
+  END;
+  $$ LANGUAGE plpgsql;
+`);
+
+await pool.query(`
+  DROP TRIGGER IF EXISTS trigger_auto_pay_debt ON wallets;
+  CREATE TRIGGER trigger_auto_pay_debt
+    AFTER UPDATE OF available_balance ON wallets
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_pay_debt();
+`);
+
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
@@ -2960,8 +3039,13 @@ app.post('/api/exchange/swap', async (req, res) => {
     const receivedAmount = amount * rate;
     
     await client.query(
-      'UPDATE wallets SET frozen_balance = frozen_balance - $1, available_balance = available_balance + $2 WHERE user_id = $3',
-      [amount, receivedAmount, userId]
+      'UPDATE wallets SET frozen_balance = frozen_balance - $1 WHERE user_id = $2',
+      [amount, userId]
+    );
+    
+    await client.query(
+      'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
+      [receivedAmount, userId]
     );
     
     await client.query(
@@ -3072,9 +3156,10 @@ app.post('/api/orders/refund', async (req, res) => {
       );
       
       await client.query(
-        `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id, metadata) 
+        `INSERT INTO wallet_transactions 
+         (user_id, type, amount, description, order_id, metadata) 
          VALUES ($1, 'refund', $2, $3, $4, $5)`,
-        [userId, amount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true })]
+        [userId, amount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true, rate: 1.0 })]
       );
       
       await client.query(
