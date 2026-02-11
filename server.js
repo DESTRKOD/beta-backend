@@ -89,7 +89,6 @@ const orderPages = {};
 
 async function initDB() {
   try {
-    // Таблица пользователей
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -104,7 +103,6 @@ async function initDB() {
       )
     `);
 
-    // Добавляем недостающие колонки в users
     const columnsToAdd = [
       { name: 'first_name', type: 'VARCHAR(100)' },
       { name: 'last_name', type: 'VARCHAR(100)' },
@@ -123,7 +121,6 @@ async function initDB() {
       }
     }
 
-    // Таблица заказов
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -141,7 +138,6 @@ async function initDB() {
       )
     `);
 
-    // Добавляем недостающие колонки в orders
     const ordersColumnsToAdd = [
       { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
       { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
@@ -160,25 +156,24 @@ async function initDB() {
       }
     }
 
-    // ТАБЛИЦА КОШЕЛЬКОВ
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
         balance INTEGER DEFAULT 0,
+        frozen_balance INTEGER DEFAULT 0,
+        available_balance INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Добавляем индексы для wallets
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id)');
     } catch (e) {
       console.log('Индекс idx_wallets_user_id уже существует:', e.message);
     }
 
-    // ТАБЛИЦА ТРАНЗАКЦИЙ КОШЕЛЬКА
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
@@ -187,11 +182,11 @@ async function initDB() {
         amount INTEGER NOT NULL,
         description TEXT,
         order_id VARCHAR(50),
+        metadata JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Добавляем индексы для wallet_transactions
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id)');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactions(order_id)');
@@ -200,7 +195,6 @@ async function initDB() {
       console.log('Индексы wallet_transactions уже существуют:', e.message);
     }
 
-    // Триггер для автоматического обновления updated_at в wallets
     try {
       await pool.query(`
         CREATE OR REPLACE FUNCTION update_wallet_timestamp()
@@ -223,7 +217,6 @@ async function initDB() {
       console.log('Ошибка создания триггера для wallets:', e.message);
     }
 
-    // Таблица товаров
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id VARCHAR(50) PRIMARY KEY,
@@ -235,38 +228,15 @@ async function initDB() {
       )
     `);
 
-    // Таблица курса обмена
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS exchange_rate (
-    id SERIAL PRIMARY KEY,
-    rate DECIMAL(10,2) NOT NULL DEFAULT 1.0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS exchange_rate (
+        id SERIAL PRIMARY KEY,
+        rate DECIMAL(10,2) NOT NULL DEFAULT 1.0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-// Добавляем поля в wallets
-try {
-  await pool.query(`
-    ALTER TABLE wallets 
-    ADD COLUMN IF NOT EXISTS frozen_balance INTEGER DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS available_balance INTEGER DEFAULT 0
-  `);
-} catch (e) {
-  console.log('Колонки уже существуют:', e.message);
-}
-
-// Добавляем metadata в wallet_transactions
-try {
-  await pool.query(`
-    ALTER TABLE wallet_transactions 
-    ADD COLUMN IF NOT EXISTS metadata JSONB
-  `);
-} catch (e) {
-  console.log('Колонка metadata уже существует:', e.message);
-}
-
-    // Индексы
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
@@ -278,14 +248,11 @@ try {
     }
 
     console.log('✅ База данных инициализирована');
-    console.log('📊 Таблицы: users, orders, products, wallets, wallet_transactions');
-
   } catch (error) {
     console.error('❌ Ошибка инициализации БД:', error);
     throw error;
   }
 }
-
 
 app.get('/health', (req, res) => {
   res.json({
@@ -705,21 +672,21 @@ userBot.onText(/\/orders/, async (msg) => {
     const ordersResult = await pool.query(
       `SELECT order_id, total, status, created_at 
        FROM orders 
-       WHERE user_id = $1 
+       WHERE user_id = $1 AND payment_status = 'confirmed'
        ORDER BY created_at DESC 
-       LIMIT 5`,
+       LIMIT 10`,
       [user.id]
     );
     
     if (ordersResult.rows.length === 0) {
       await userBot.sendMessage(chatId, 
-        `📭 У вас пока нет заказов.\n\n` +
+        `📭 У вас пока нет оплаченных заказов.\n\n` +
         `Перейдите в магазин, чтобы сделать первую покупку!`
       );
       return;
     }
     
-    let ordersText = `📦 Ваши последние заказы:\n\n`;
+    let ordersText = `📦 Ваши оплаченные заказы:\n\n`;
     
     ordersResult.rows.forEach((order, index) => {
       const orderDate = new Date(order.created_at).toLocaleDateString('ru-RU');
@@ -799,7 +766,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -814,7 +781,6 @@ adminBot.onText(/\/setrate\s+(\d+(?:\.\d+)?)/, async (msg, match) => {
       return;
     }
     
-    // Удаляем старые или просто вставляем новую запись
     await pool.query(
       'INSERT INTO exchange_rate (rate, updated_at) VALUES ($1, CURRENT_TIMESTAMP)',
       [rate]
@@ -851,6 +817,7 @@ adminBot.onText(/\/rate/, async (msg) => {
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении курса');
   }
 });
+
 adminBot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -1145,7 +1112,6 @@ async function handleEditPriceStep(msg, userState) {
   }
 }
 
-
 async function handleAddProductStep(msg, userState) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
@@ -1240,9 +1206,6 @@ adminBot.on('callback_query', async (callbackQuery) => {
       case 'request_code':
         await handleRequestCode(params[0], msg, callbackQuery.id);
         break;
-      case 'cancel_refund':
-        await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
-        break;
       case 'order_ready':
         await handleOrderReady(params[0], msg, callbackQuery.id);
         break;
@@ -1270,6 +1233,12 @@ adminBot.on('callback_query', async (callbackQuery) => {
         break;
       case 'confirm_refund':
         await handleConfirmRefund(params[0], msg, callbackQuery.id, params[1]);
+        break;
+      case 'cancel_refund':
+        await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
+        break;
+      case 'confirm_cancel_refund':
+        await handleConfirmCancelRefund(params[0], msg, callbackQuery.id, params[1]);
         break;
       case 'add_product_prompt':
         await adminBot.answerCallbackQuery(callbackQuery.id);
@@ -1311,166 +1280,6 @@ adminBot.on('callback_query', async (callbackQuery) => {
     });
   }
 });
-
-async function handleCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
-  try {
-    const orderResult = await pool.query(
-      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2',
-      [orderId, 'manyback']
-    );
-    
-    if (orderResult.rows.length === 0) {
-      await adminBot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Возврат не найден или уже отменен',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const order = orderResult.rows[0];
-    const refundAmount = order.refund_amount;
-    const userId = order.user_id;
-    
-    if (!userId) {
-      await adminBot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ К заказу не привязан пользователь',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const confirmKeyboard = {
-      inline_keyboard: [
-        [
-          { text: '✅ Да, отменить возврат', callback_data: `confirm_cancel_refund:${orderId}:${returnPage}` },
-          { text: '❌ Нет', callback_data: `order_detail:${orderId}:${returnPage}` }
-        ]
-      ]
-    };
-    
-    await adminBot.editMessageText(`⚠️ Отмена возврата для заказа #${orderId}\n\n` +
-      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
-      `👤 Пользователь ID: ${userId}\n\n` +
-      `❄️ Средства будут списаны с замороженного баланса.\n` +
-      `💰 Баланс пользователя может уйти в минус, если средств недостаточно.\n\n` +
-      `Вы уверены?`, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id,
-      reply_markup: confirmKeyboard
-    });
-    
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: 'Подтвердите отмену возврата',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка отмены возврата:', error);
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  }
-}
-
-async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
-  const client = await pool.connect();
-  
-  try {
-    await client.query('BEGIN');
-    
-    const orderResult = await client.query(
-      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
-      [orderId, 'manyback']
-    );
-    
-    if (orderResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      await adminBot.answerCallbackQuery(callbackQueryId, { 
-        text: '❌ Возврат не найден',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    const order = orderResult.rows[0];
-    const refundAmount = order.refund_amount;
-    const userId = order.user_id;
-    
-    await client.query(
-      'UPDATE wallets SET frozen_balance = frozen_balance - $1 WHERE user_id = $2',
-      [refundAmount, userId]
-    );
-    
-    await client.query(
-      'UPDATE orders SET status = $1, refund_amount = NULL WHERE order_id = $2',
-      ['completed', orderId]
-    );
-    
-    await client.query(
-      `INSERT INTO wallet_transactions 
-       (user_id, type, amount, description, order_id, metadata) 
-       VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
-      [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true, cancel_refund: true })]
-    );
-    
-    await client.query('COMMIT');
-    
-    const successText = `✅ Возврат отменен!\n\n` +
-      `📦 Заказ: #${orderId}\n` +
-      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
-      `❄️ Средства списаны с замороженного баланса\n` +
-      `📊 Статус заказа: Завершен`;
-    
-    await adminBot.editMessageText(successText, {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    try {
-      const userResult = await client.query(
-        'SELECT tg_id FROM users WHERE id = $1',
-        [userId]
-      );
-      
-      if (userResult.rows.length > 0) {
-        const userTgId = userResult.rows[0].tg_id;
-        
-        await userBot.sendMessage(userTgId, 
-          `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
-          `💰 Сумма ${formatRub(refundAmount)} списана с вашего замороженного баланса.`
-        );
-      }
-    } catch (notifyError) {
-      console.error('Ошибка уведомления пользователя:', notifyError);
-    }
-    
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: '✅ Возврат отменен',
-      show_alert: false
-    });
-    
-    setTimeout(async () => {
-      await showOrderDetails(msg.chat.id, msg.message_id, orderId, returnPage);
-    }, 2000);
-    
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('❌ Ошибка подтверждения отмены возврата:', error);
-    
-    await adminBot.editMessageText('❌ Ошибка при отмене возврата. Баланс пользователя не изменен.', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: '❌ Ошибка',
-      show_alert: true 
-    });
-  } finally {
-    client.release();
-  }
-}
 
 async function handleOrdersPage(msg, page, callbackQueryId) {
   try {
@@ -1682,7 +1491,6 @@ async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1
   }
 }
 
-// ПРИ ОФОРМЛЕНИИ ВОЗВРАТА — через админ-бота
 async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const orderResult = await pool.query(
@@ -1836,105 +1644,163 @@ async function handleRefundStep(msg, userState) {
   }
 }
 
-// Шаг ввода суммы возврата
-async function handleRefundStep(msg, userState) {
-  const chatId = msg.chat.id;
-  const text = msg.text.trim();
+async function handleCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
+  try {
+    const orderResult = await pool.query(
+      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2',
+      [orderId, 'manyback']
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Возврат не найден или уже отменен',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const order = orderResult.rows[0];
+    const refundAmount = order.refund_amount;
+    const userId = order.user_id;
+    
+    if (!userId) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ К заказу не привязан пользователь',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const confirmKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Да, отменить возврат', callback_data: `confirm_cancel_refund:${orderId}:${returnPage}` },
+          { text: '❌ Нет', callback_data: `order_detail:${orderId}:${returnPage}` }
+        ]
+      ]
+    };
+    
+    await adminBot.editMessageText(`⚠️ Отмена возврата для заказа #${orderId}\n\n` +
+      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+      `👤 Пользователь ID: ${userId}\n\n` +
+      `❄️ Средства будут списаны с замороженного баланса.\n` +
+      `💰 Баланс пользователя может уйти в минус, если средств недостаточно.\n\n` +
+      `Вы уверены?`, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      reply_markup: confirmKeyboard
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: 'Подтвердите отмену возврата',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка отмены возврата:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPage = 1) {
+  const client = await pool.connect();
   
   try {
-    switch(userState.step) {
-      case 'awaiting_refund_amount':
-        const refundAmount = parseInt(text);
-        const maxAmount = userState.orderTotal;
-        
-        if (isNaN(refundAmount) || refundAmount <= 0 || refundAmount > maxAmount) {
-          adminBot.sendMessage(chatId, `❌ Сумма должна быть числом от 1 до ${maxAmount}. Введите сумму еще раз:`);
-          return;
-        }
-        
-        const orderId = userState.orderId;
-        const userId = userState.userId;
-        
-        const client = await pool.connect();
-        
-        try {
-          await client.query('BEGIN');
-          
-          await client.query(
-            'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
-            ['manyback', refundAmount, orderId]
-          );
-          
-          await client.query(
-            `INSERT INTO wallets (user_id, frozen_balance, balance, available_balance) 
-             VALUES ($1, 0, 0, 0) 
-             ON CONFLICT (user_id) DO NOTHING`,
-            [userId]
-          );
-          
-          // 🔥 ВАЖНО: пополняем ЗАМОРОЖЕННЫЙ баланс, а не обычный
-          await client.query(
-            'UPDATE wallets SET frozen_balance = frozen_balance + $1 WHERE user_id = $2',
-            [refundAmount, userId]
-          );
-          
-          await client.query(
-            `INSERT INTO wallet_transactions 
-             (user_id, type, amount, description, order_id, metadata) 
-             VALUES ($1, 'refund', $2, $3, $4, $5)`,
-            [userId, refundAmount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true })]
-          );
-          
-          await client.query('COMMIT');
-          
-          const successText = `✅ Возврат оформлен!\n\n` +
-            `📦 Заказ: #${orderId}\n` +
-            `💰 Сумма заказа: ${formatRub(maxAmount)}\n` +
-            `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
-            `❄️ Средства заморожены на кошельке пользователя\n\n` +
-            `Пользователь увидит сумму в разделе "Заморожено" и сможет разморозить через обмен.`;
-          
-          delete userStates[chatId];
-          
-          adminBot.sendMessage(chatId, successText);
-          
-          // Уведомление пользователю
-          try {
-            const userResult = await client.query(
-              'SELECT tg_id FROM users WHERE id = $1',
-              [userId]
-            );
-            
-            if (userResult.rows.length > 0) {
-              const userTgId = userResult.rows[0].tg_id;
-              
-              await userBot.sendMessage(userTgId, 
-                `💰 Вам начислен возврат!\n\n` +
-                `📦 Заказ: #${orderId}\n` +
-                `💰 Сумма: ${formatRub(refundAmount)}\n\n` +
-                `❄️ Средства заморожены.\n` +
-                `👉 Перейдите в "Кошелёк" → "Разморозить деньги", чтобы обменять их на DCoin.`
-              );
-            }
-          } catch (notifyError) {
-            console.error('Ошибка уведомления пользователя:', notifyError);
-          }
-          
-          await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
-          
-        } catch (error) {
-          await client.query('ROLLBACK');
-          throw error;
-        } finally {
-          client.release();
-        }
-        
-        break;
+    await client.query('BEGIN');
+    
+    const orderResult = await client.query(
+      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
+      [orderId, 'manyback']
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Возврат не найден',
+        show_alert: true 
+      });
+      return;
     }
+    
+    const order = orderResult.rows[0];
+    const refundAmount = order.refund_amount;
+    const userId = order.user_id;
+    
+    await client.query(
+      'UPDATE wallets SET frozen_balance = frozen_balance - $1 WHERE user_id = $2',
+      [refundAmount, userId]
+    );
+    
+    await client.query(
+      'UPDATE orders SET status = $1, refund_amount = NULL WHERE order_id = $2',
+      ['completed', orderId]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, order_id, metadata) 
+       VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
+      [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true, cancel_refund: true })]
+    );
+    
+    await client.query('COMMIT');
+    
+    const successText = `✅ Возврат отменен!\n\n` +
+      `📦 Заказ: #${orderId}\n` +
+      `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+      `❄️ Средства списаны с замороженного баланса\n` +
+      `📊 Статус заказа: Завершен`;
+    
+    await adminBot.editMessageText(successText, {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    try {
+      const userResult = await client.query(
+        'SELECT tg_id FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      if (userResult.rows.length > 0) {
+        const userTgId = userResult.rows[0].tg_id;
+        
+        await userBot.sendMessage(userTgId, 
+          `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
+          `💰 Сумма ${formatRub(refundAmount)} списана с вашего замороженного баланса.`
+        );
+      }
+    } catch (notifyError) {
+      console.error('Ошибка уведомления пользователя:', notifyError);
+    }
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '✅ Возврат отменен',
+      show_alert: false
+    });
+    
+    setTimeout(async () => {
+      await showOrderDetails(msg.chat.id, msg.message_id, orderId, returnPage);
+    }, 2000);
+    
   } catch (error) {
-    console.error('❌ Ошибка оформления возврата:', error);
-    adminBot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново.');
-    delete userStates[chatId];
+    await client.query('ROLLBACK');
+    console.error('❌ Ошибка подтверждения отмены возврата:', error);
+    
+    await adminBot.editMessageText('❌ Ошибка при отмене возврата. Баланс пользователя не изменен.', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  } finally {
+    client.release();
   }
 }
 
@@ -2098,7 +1964,7 @@ async function handleRequestCode(orderId, msg, callbackQueryId) {
     console.error('❌ Ошибка запроса кода:', error);
     await adminBot.answerCallbackQuery(callbackQueryId, { 
       text: '❌ Ошибка при запросе кода',
-      show_alert: true
+      show_alert: true 
     });
   }
 }
@@ -2424,15 +2290,15 @@ async function showOrderDetails(chatId, messageId, orderId, returnPage = 1) {
       ]);
     }
     
-    if (order.status !== 'manyback') {
-      keyboardRows.push([
-        { text: '💰 Оформить возврат', callback_data: `process_refund:${orderId}:${returnPage}` }
-      ]);
-    }
-
     if (order.status === 'manyback' && order.refund_amount > 0) {
       keyboardRows.push([
         { text: '↩️ Отменить возврат', callback_data: `cancel_refund:${orderId}:${returnPage}` }
+      ]);
+    }
+    
+    if (order.status !== 'manyback') {
+      keyboardRows.push([
+        { text: '💰 Оформить возврат', callback_data: `process_refund:${orderId}:${returnPage}` }
       ]);
     }
     
@@ -2628,61 +2494,6 @@ app.post('/api/auth/start-login', async (req, res) => {
   }
 });
 
-
-
-// ПОЛУЧИТЬ данные кошелька пользователя
-app.get('/api/wallet/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    // Проверяем существование пользователя
-    const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-    
-    // Получаем баланс и транзакции кошелька
-    const walletResult = await pool.query(
-      'SELECT balance FROM wallets WHERE user_id = $1',
-      [userId]
-    );
-    
-    // Если кошелька нет - создаем
-    if (walletResult.rows.length === 0) {
-      await pool.query(
-        'INSERT INTO wallets (user_id, balance) VALUES ($1, 0)',
-        [userId]
-      );
-    }
-    
-    // Получаем историю транзакций
-    const transactionsResult = await pool.query(
-      `SELECT id, type, amount, description as title, order_id as "orderId", created_at as date
-       FROM wallet_transactions 
-       WHERE user_id = $1 
-       ORDER BY created_at DESC 
-       LIMIT 50`,
-      [userId]
-    );
-    
-    // Получаем текущий баланс
-    const currentWallet = await pool.query(
-      'SELECT balance FROM wallets WHERE user_id = $1',
-      [userId]
-    );
-    
-    res.json({
-      success: true,
-      balance: currentWallet.rows[0]?.balance || 0,
-      transactions: transactionsResult.rows
-    });
-    
-  } catch (error) {
-    console.error('Ошибка получения кошелька:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -2692,156 +2503,9 @@ app.get('/api/wallet/:userId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
     
-    // Создаем кошелек если нет
     await pool.query(
-      `INSERT INTO wallets (user_id, balance) 
-       VALUES ($1, 0) 
-       ON CONFLICT (user_id) DO NOTHING`,
-      [userId]
-    );
-    
-    const walletResult = await pool.query(
-      'SELECT balance FROM wallets WHERE user_id = $1',
-      [userId]
-    );
-    
-    const transactionsResult = await pool.query(
-      `SELECT id, type, amount, description as title, order_id as "orderId", created_at as date
-       FROM wallet_transactions 
-       WHERE user_id = $1 
-       ORDER BY created_at DESC 
-       LIMIT 100`,
-      [userId]
-    );
-    
-    res.json({
-      success: true,
-      balance: walletResult.rows[0]?.balance || 0,
-      transactions: transactionsResult.rows
-    });
-    
-  } catch (error) {
-    console.error('Ошибка получения кошелька:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-
-// Таблица курса обмена
-app.get('/api/exchange/rate', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT rate FROM exchange_rate ORDER BY updated_at DESC LIMIT 1'
-    );
-    
-    const rate = result.rows[0]?.rate || 1.0;
-    
-    res.json({
-      success: true,
-      rate: rate
-    });
-  } catch (error) {
-    console.error('Ошибка получения курса:', error);
-    res.json({ success: true, rate: 1.0 });
-  }
-});
-
-// Установка курса (для админ-бота)
-app.post('/api/exchange/rate', async (req, res) => {
-  try {
-    const { rate } = req.body;
-    
-    await pool.query(
-      'INSERT INTO exchange_rate (rate) VALUES ($1)',
-      [rate]
-    );
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Ошибка установки курса:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-// Обмен валют
-app.post('/api/exchange/swap', async (req, res) => {
-  const client = await pool.connect();
-  
-  try {
-    const { userId, amount, rate } = req.body;
-    
-    await client.query('BEGIN');
-    
-    // Получаем текущие балансы
-    const walletResult = await client.query(
-      'SELECT frozen_balance, available_balance FROM wallets WHERE user_id = $1 FOR UPDATE',
-      [userId]
-    );
-    
-    let wallet = walletResult.rows[0];
-    
-    if (!wallet) {
-      await client.query(
-        'INSERT INTO wallets (user_id, frozen_balance, available_balance) VALUES ($1, 0, 0)',
-        [userId]
-      );
-      wallet = { frozen_balance: 0, available_balance: 0 };
-    }
-    
-    // Проверяем достаточно ли средств
-    if (wallet.frozen_balance < amount) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Недостаточно замороженных средств' 
-      });
-    }
-    
-    const receivedAmount = amount * rate;
-    
-    // Обновляем балансы
-    await client.query(
-      'UPDATE wallets SET frozen_balance = frozen_balance - $1, available_balance = available_balance + $2 WHERE user_id = $3',
-      [amount, receivedAmount, userId]
-    );
-    
-    // Записываем транзакцию
-    await client.query(
-      `INSERT INTO wallet_transactions 
-       (user_id, type, amount, description, metadata) 
-       VALUES ($1, 'withdraw', $2, $3, $4)`,
-      [userId, -amount, `Обмен на IMGRU`, JSON.stringify({ rate, received: receivedAmount })]
-    );
-    
-    await client.query(
-      `INSERT INTO wallet_transactions 
-       (user_id, type, amount, description, metadata) 
-       VALUES ($1, 'deposit', $2, $3, $4)`,
-      [userId, receivedAmount, `Получено от обмена`, JSON.stringify({ rate, spent: amount })]
-    );
-    
-    await client.query('COMMIT');
-    
-    res.json({ success: true });
-    
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Ошибка обмена:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  } finally {
-    client.release();
-  }
-});
-
-// Обновленный GET /api/wallet/:userId
-app.get('/api/wallet/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    // Создаем кошелек если нет
-    await pool.query(
-      `INSERT INTO wallets (user_id, frozen_balance, available_balance) 
-       VALUES ($1, 0, 0) 
+      `INSERT INTO wallets (user_id, frozen_balance, balance, available_balance) 
+       VALUES ($1, 0, 0, 0) 
        ON CONFLICT (user_id) DO NOTHING`,
       [userId]
     );
@@ -2876,18 +2540,114 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// ПОПОЛНИТЬ кошелек (например, при возврате)
+app.get('/api/exchange/rate', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT rate FROM exchange_rate ORDER BY updated_at DESC LIMIT 1'
+    );
+    
+    const rate = result.rows[0]?.rate || 1.0;
+    
+    res.json({
+      success: true,
+      rate: rate
+    });
+  } catch (error) {
+    console.error('Ошибка получения курса:', error);
+    res.json({ success: true, rate: 1.0 });
+  }
+});
+
+app.post('/api/exchange/rate', async (req, res) => {
+  try {
+    const { rate } = req.body;
+    
+    await pool.query(
+      'INSERT INTO exchange_rate (rate) VALUES ($1)',
+      [rate]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка установки курса:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/api/exchange/swap', async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { userId, amount, rate } = req.body;
+    
+    await client.query('BEGIN');
+    
+    const walletResult = await client.query(
+      'SELECT frozen_balance, available_balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId]
+    );
+    
+    let wallet = walletResult.rows[0];
+    
+    if (!wallet) {
+      await client.query(
+        'INSERT INTO wallets (user_id, frozen_balance, available_balance) VALUES ($1, 0, 0)',
+        [userId]
+      );
+      wallet = { frozen_balance: 0, available_balance: 0 };
+    }
+    
+    if (wallet.frozen_balance < amount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Недостаточно замороженных средств' 
+      });
+    }
+    
+    const receivedAmount = amount * rate;
+    
+    await client.query(
+      'UPDATE wallets SET frozen_balance = frozen_balance - $1, available_balance = available_balance + $2 WHERE user_id = $3',
+      [amount, receivedAmount, userId]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, metadata) 
+       VALUES ($1, 'withdraw', $2, $3, $4)`,
+      [userId, -amount, `Обмен на DCoin`, JSON.stringify({ rate, received: receivedAmount })]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions 
+       (user_id, type, amount, description, metadata) 
+       VALUES ($1, 'deposit', $2, $3, $4)`,
+      [userId, receivedAmount, `Получено от обмена`, JSON.stringify({ rate, spent: amount })]
+    );
+    
+    await client.query('COMMIT');
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Ошибка обмена:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/wallet/deposit', async (req, res) => {
   try {
     const { userId, amount, orderId, description } = req.body;
     
-    // Начинаем транзакцию
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
       
-      // Создаем кошелек если нет
       await client.query(
         `INSERT INTO wallets (user_id, balance) 
          VALUES ($1, 0) 
@@ -2895,13 +2655,11 @@ app.post('/api/wallet/deposit', async (req, res) => {
         [userId]
       );
       
-      // Обновляем баланс
       await client.query(
         'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
         [amount, userId]
       );
       
-      // Записываем транзакцию
       await client.query(
         `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id) 
          VALUES ($1, 'deposit', $2, $3, $4)`,
@@ -2925,12 +2683,10 @@ app.post('/api/wallet/deposit', async (req, res) => {
   }
 });
 
-// ПРИ ОФОРМЛЕНИИ ВОЗВРАТА
 app.post('/api/orders/refund', async (req, res) => {
   try {
     const { orderId, amount } = req.body;
     
-    // Получаем user_id из заказа
     const orderResult = await pool.query(
       'SELECT user_id FROM orders WHERE order_id = $1',
       [orderId]
@@ -2946,34 +2702,29 @@ app.post('/api/orders/refund', async (req, res) => {
       return res.status(400).json({ success: false, error: 'User not linked to order' });
     }
     
-    // Пополняем кошелек
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
       
-      // Создаем кошелек если нет
       await client.query(
-        `INSERT INTO wallets (user_id, balance) 
-         VALUES ($1, 0) 
+        `INSERT INTO wallets (user_id, frozen_balance, balance, available_balance) 
+         VALUES ($1, 0, 0, 0) 
          ON CONFLICT (user_id) DO NOTHING`,
         [userId]
       );
       
-      // Начисляем средства
       await client.query(
-        'UPDATE wallets SET balance = balance + $1 WHERE user_id = $2',
+        'UPDATE wallets SET frozen_balance = frozen_balance + $1 WHERE user_id = $2',
         [amount, userId]
       );
       
-      // Записываем транзакцию
       await client.query(
-        `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id) 
-         VALUES ($1, 'deposit', $2, $3, $4)`,
-        [userId, amount, `Возврат по заказу #${orderId}`, orderId]
+        `INSERT INTO wallet_transactions (user_id, type, amount, description, order_id, metadata) 
+         VALUES ($1, 'refund', $2, $3, $4, $5)`,
+        [userId, amount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true })]
       );
       
-      // Обновляем статус заказа
       await client.query(
         'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
         ['manyback', amount, orderId]
@@ -3079,7 +2830,7 @@ app.get('/api/auth/profile', async (req, res) => {
       `SELECT order_id as id, total, status, payment_status, email, code, 
               code_requested, wrong_code_attempts, created_at as date, refund_amount
        FROM orders 
-       WHERE user_id = $1 
+       WHERE user_id = $1 AND payment_status = 'confirmed'
        ORDER BY created_at DESC`,
       [userId]
     );
@@ -3628,8 +3379,8 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`🚀 Сервер запущен на порту ${PORT}`);
       console.log(`📞 API доступен по адресу: ${SERVER_URL}`);
-      console.log(`🤖 Админ бот запущен: @${adminBot.options.username}`);
-      console.log(`🤖 Бот для пользователей запущен: @${userBot.options.username}`);
+      console.log(`🤖 Админ бот запущен: @${adminBot.options?.username || 'unknown'}`);
+      console.log(`🤖 Бот для пользователей запущен: @${userBot.options?.username || 'unknown'}`);
       console.log(`👑 Админ ID: ${ADMIN_ID}`);
       console.log(`🌐 Сайт: ${SITE_URL}`);
       
@@ -3657,7 +3408,4 @@ process.on('SIGINT', () => {
   setTimeout(() => process.exit(0), 1000);
 });
 
-startServer().catch(error => {
-  console.error('Не удалось запустить сервер:', error);
-  process.exit(1);
-});
+startServer();
