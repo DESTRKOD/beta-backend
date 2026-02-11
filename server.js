@@ -803,7 +803,7 @@ adminBot.onText(/\/start/, async (msg) => {
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
-adminBot.onText(/\/setrate (\d+(?:\.\d+)?)/, async (msg, match) => {
+adminBot.onText(/\/setrate\s+(\d+(?:\.\d+)?)/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
   try {
@@ -814,14 +814,15 @@ adminBot.onText(/\/setrate (\d+(?:\.\d+)?)/, async (msg, match) => {
       return;
     }
     
+    // Удаляем старые или просто вставляем новую запись
     await pool.query(
-      'INSERT INTO exchange_rate (rate) VALUES ($1)',
+      'INSERT INTO exchange_rate (rate, updated_at) VALUES ($1, CURRENT_TIMESTAMP)',
       [rate]
     );
     
     adminBot.sendMessage(
       msg.chat.id, 
-      `✅ Курс обмена установлен: 1 RUB = ${rate} IMGRU`
+      `✅ Курс обмена установлен:\n1 RUB = ${rate} DCoin`
     );
     
   } catch (error) {
@@ -842,7 +843,7 @@ adminBot.onText(/\/rate/, async (msg) => {
     
     adminBot.sendMessage(
       msg.chat.id,
-      `📊 Текущий курс обмена:\n1 RUB = ${rate} IMGRU`
+      `📊 Текущий курс обмена:\n1 RUB = ${rate} DCoin`
     );
     
   } catch (error) {
@@ -850,7 +851,6 @@ adminBot.onText(/\/rate/, async (msg) => {
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении курса');
   }
 });
-
 adminBot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -1623,6 +1623,7 @@ async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1
   }
 }
 
+// ПРИ ОФОРМЛЕНИИ ВОЗВРАТА — через админ-бота
 async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1) {
   try {
     const orderResult = await pool.query(
@@ -1675,6 +1676,108 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
       text: '❌ Ошибка',
       show_alert: true 
     });
+  }
+}
+
+// Шаг ввода суммы возврата
+async function handleRefundStep(msg, userState) {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  try {
+    switch(userState.step) {
+      case 'awaiting_refund_amount':
+        const refundAmount = parseInt(text);
+        const maxAmount = userState.orderTotal;
+        
+        if (isNaN(refundAmount) || refundAmount <= 0 || refundAmount > maxAmount) {
+          adminBot.sendMessage(chatId, `❌ Сумма должна быть числом от 1 до ${maxAmount}. Введите сумму еще раз:`);
+          return;
+        }
+        
+        const orderId = userState.orderId;
+        const userId = userState.userId;
+        
+        const client = await pool.connect();
+        
+        try {
+          await client.query('BEGIN');
+          
+          await client.query(
+            'UPDATE orders SET status = $1, refund_amount = $2 WHERE order_id = $3',
+            ['manyback', refundAmount, orderId]
+          );
+          
+          await client.query(
+            `INSERT INTO wallets (user_id, frozen_balance, balance, available_balance) 
+             VALUES ($1, 0, 0, 0) 
+             ON CONFLICT (user_id) DO NOTHING`,
+            [userId]
+          );
+          
+          // 🔥 ВАЖНО: пополняем ЗАМОРОЖЕННЫЙ баланс, а не обычный
+          await client.query(
+            'UPDATE wallets SET frozen_balance = frozen_balance + $1 WHERE user_id = $2',
+            [refundAmount, userId]
+          );
+          
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, order_id, metadata) 
+             VALUES ($1, 'refund', $2, $3, $4, $5)`,
+            [userId, refundAmount, `Возврат по заказу #${orderId}`, orderId, JSON.stringify({ frozen: true })]
+          );
+          
+          await client.query('COMMIT');
+          
+          const successText = `✅ Возврат оформлен!\n\n` +
+            `📦 Заказ: #${orderId}\n` +
+            `💰 Сумма заказа: ${formatRub(maxAmount)}\n` +
+            `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+            `❄️ Средства заморожены на кошельке пользователя\n\n` +
+            `Пользователь увидит сумму в разделе "Заморожено" и сможет разморозить через обмен.`;
+          
+          delete userStates[chatId];
+          
+          adminBot.sendMessage(chatId, successText);
+          
+          // Уведомление пользователю
+          try {
+            const userResult = await client.query(
+              'SELECT tg_id FROM users WHERE id = $1',
+              [userId]
+            );
+            
+            if (userResult.rows.length > 0) {
+              const userTgId = userResult.rows[0].tg_id;
+              
+              await userBot.sendMessage(userTgId, 
+                `💰 Вам начислен возврат!\n\n` +
+                `📦 Заказ: #${orderId}\n` +
+                `💰 Сумма: ${formatRub(refundAmount)}\n\n` +
+                `❄️ Средства заморожены.\n` +
+                `👉 Перейдите в "Кошелёк" → "Разморозить деньги", чтобы обменять их на DCoin.`
+              );
+            }
+          } catch (notifyError) {
+            console.error('Ошибка уведомления пользователя:', notifyError);
+          }
+          
+          await showOrderDetails(chatId, null, orderId, userState.returnPage || 1);
+          
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+        
+        break;
+    }
+  } catch (error) {
+    console.error('❌ Ошибка оформления возврата:', error);
+    adminBot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново.');
+    delete userStates[chatId];
   }
 }
 
