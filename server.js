@@ -3221,6 +3221,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
+
 app.get('/api/auth/profile', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -3244,7 +3245,10 @@ app.get('/api/auth/profile', async (req, res) => {
       `SELECT order_id as id, total, status, payment_status, email, code, 
               code_requested, wrong_code_attempts, created_at as date, refund_amount
        FROM orders 
-       WHERE user_id = $1 AND payment_status = 'confirmed'
+       WHERE user_id = $1 AND (
+         payment_status = 'confirmed' 
+         OR status IN ('waiting', 'waiting_code_request', 'waiting_execution', 'completed', 'manyback')
+       )
        ORDER BY created_at DESC`,
       [userId]
     );
@@ -3282,7 +3286,6 @@ app.get('/api/auth/profile', async (req, res) => {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-
 app.post('/api/auth/logout', async (req, res) => {
   try {
     res.json({
