@@ -237,84 +237,82 @@ async function initDB() {
       )
     `);
 
-
-    // Триггер для автоматического списания долга при пополнении баланса
-await pool.query(`
-  CREATE OR REPLACE FUNCTION auto_pay_debt()
-  RETURNS TRIGGER AS $$
-  DECLARE
-    total_debt INTEGER;
-    pay_amount INTEGER;
-    debt_record RECORD;
-  BEGIN
-    IF NEW.available_balance > OLD.available_balance THEN
-      SELECT SUM(ABS(amount)) INTO total_debt
-      FROM wallet_transactions
-      WHERE user_id = NEW.user_id AND type = 'debt';
-      
-      total_debt := COALESCE(total_debt, 0);
-      
-      IF total_debt > 0 AND NEW.available_balance > 0 THEN
-        pay_amount := LEAST(NEW.available_balance, total_debt);
-        
-        FOR debt_record IN 
-          SELECT id, amount, order_id, metadata
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION auto_pay_debt()
+      RETURNS TRIGGER AS $$
+      DECLARE
+        total_debt INTEGER;
+        pay_amount INTEGER;
+        debt_record RECORD;
+      BEGIN
+        IF NEW.available_balance > OLD.available_balance THEN
+          SELECT SUM(ABS(amount)) INTO total_debt
           FROM wallet_transactions
-          WHERE user_id = NEW.user_id AND type = 'debt'
-          ORDER BY created_at ASC
-        LOOP
-          EXIT WHEN pay_amount <= 0;
+          WHERE user_id = NEW.user_id AND type = 'debt';
           
-          DECLARE
-            debt_amount INTEGER := ABS(debt_record.amount);
-            debt_pay INTEGER := LEAST(debt_amount, pay_amount);
-          BEGIN
-            UPDATE wallet_transactions
-            SET amount = amount + debt_pay,
-                metadata = jsonb_set(
-                  COALESCE(metadata, '{}'),
-                  '{paid}',
-                  to_jsonb(COALESCE((metadata->>'paid')::int, 0) + debt_pay)
-                )
-            WHERE id = debt_record.id;
+          total_debt := COALESCE(total_debt, 0);
+          
+          IF total_debt > 0 AND NEW.available_balance > 0 THEN
+            pay_amount := LEAST(NEW.available_balance, total_debt);
             
-            IF debt_pay >= debt_amount THEN
-              UPDATE wallet_transactions
-              SET type = 'debt_paid',
-                  metadata = metadata || '{"fully_paid": true}'
-              WHERE id = debt_record.id;
-            END IF;
+            FOR debt_record IN 
+              SELECT id, amount, order_id, metadata
+              FROM wallet_transactions
+              WHERE user_id = NEW.user_id AND type = 'debt'
+              ORDER BY created_at ASC
+            LOOP
+              EXIT WHEN pay_amount <= 0;
+              
+              DECLARE
+                debt_amount INTEGER := ABS(debt_record.amount);
+                debt_pay INTEGER := LEAST(debt_amount, pay_amount);
+              BEGIN
+                UPDATE wallet_transactions
+                SET amount = amount + debt_pay,
+                    metadata = jsonb_set(
+                      COALESCE(metadata, '{}'),
+                      '{paid}',
+                      to_jsonb(COALESCE((metadata->>'paid')::int, 0) + debt_pay)
+                    )
+                WHERE id = debt_record.id;
+                
+                IF debt_pay >= debt_amount THEN
+                  UPDATE wallet_transactions
+                  SET type = 'debt_paid',
+                      metadata = metadata || '{"fully_paid": true}'
+                  WHERE id = debt_record.id;
+                END IF;
+                
+                pay_amount := pay_amount - debt_pay;
+              END;
+            END LOOP;
             
-            pay_amount := pay_amount - debt_pay;
-          END;
-        END LOOP;
+            INSERT INTO wallet_transactions
+            (user_id, type, amount, description, metadata)
+            VALUES (
+              NEW.user_id,
+              'debt_payment',
+              -LEAST(NEW.available_balance - NEW.available_balance + pay_amount, total_debt),
+              'Автоматическое погашение задолженности',
+              jsonb_build_object('auto_paid', true)
+            );
+            
+            NEW.available_balance := NEW.available_balance - LEAST(total_debt, OLD.available_balance + (NEW.available_balance - OLD.available_balance));
+          END IF;
+        END IF;
         
-        INSERT INTO wallet_transactions
-        (user_id, type, amount, description, metadata)
-        VALUES (
-          NEW.user_id,
-          'debt_payment',
-          -LEAST(NEW.available_balance - NEW.available_balance + pay_amount, total_debt),
-          'Автоматическое погашение задолженности',
-          jsonb_build_object('auto_paid', true)
-        );
-        
-        NEW.available_balance := NEW.available_balance - LEAST(total_debt, OLD.available_balance + (NEW.available_balance - OLD.available_balance));
-      END IF;
-    END IF;
-    
-    RETURN NEW;
-  END;
-  $$ LANGUAGE plpgsql;
-`);
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
 
-await pool.query(`
-  DROP TRIGGER IF EXISTS trigger_auto_pay_debt ON wallets;
-  CREATE TRIGGER trigger_auto_pay_debt
-    AFTER UPDATE OF available_balance ON wallets
-    FOR EACH ROW
-    EXECUTE FUNCTION auto_pay_debt();
-`);
+    await pool.query(`
+      DROP TRIGGER IF EXISTS trigger_auto_pay_debt ON wallets;
+      CREATE TRIGGER trigger_auto_pay_debt
+        AFTER UPDATE OF available_balance ON wallets
+        FOR EACH ROW
+        EXECUTE FUNCTION auto_pay_debt();
+    `);
 
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
@@ -1716,7 +1714,7 @@ async function handleCancelOrder(orderId, msg, callbackQueryId, returnPage = 1) 
       reply_markup: confirmKeyboard
     });
     
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
       text: 'Подтвердите отмену',
       show_alert: false 
     });
@@ -2014,7 +2012,7 @@ async function handleCancelRefund(orderId, msg, callbackQueryId, returnPage = 1)
     await adminBot.editMessageText(`⚠️ Отмена возврата для заказа #${orderId}\n\n` +
       `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
       `👤 Пользователь ID: ${userId}\n\n` +
-      `❄️ Средства будут списаны с замороженного баланса.\n` +
+      `⚠️ Средства будут списаны с доступного баланса пользователя DCoin.\n` +
       `💰 Баланс пользователя может уйти в минус, если средств недостаточно.\n\n` +
       `Вы уверены?`, {
       chat_id: msg.chat.id,
@@ -2022,7 +2020,7 @@ async function handleCancelRefund(orderId, msg, callbackQueryId, returnPage = 1)
       reply_markup: confirmKeyboard
     });
     
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
       text: 'Подтвердите отмену возврата',
       show_alert: false
     });
@@ -2043,7 +2041,7 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     await client.query('BEGIN');
     
     const orderResult = await client.query(
-      'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
+      'SELECT refund_amount, user_id FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
       [orderId, 'manyback']
     );
     
@@ -2066,24 +2064,6 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     );
     
     let wallet = walletResult.rows[0];
-    let needToSpend = refundAmount;
-    let spentAmount = 0;
-    let rate = 1.0;
-    
-    const exchangeResult = await client.query(
-      `SELECT metadata FROM wallet_transactions 
-       WHERE user_id = $1 AND metadata->>'orderId' = $2 AND type = 'withdraw' AND metadata->>'spent' IS NOT NULL
-       ORDER BY created_at DESC LIMIT 1`,
-      [userId, orderId]
-    );
-    
-    if (exchangeResult.rows.length > 0) {
-      const exchangeTx = exchangeResult.rows[0];
-      if (exchangeTx.metadata && exchangeTx.metadata.rate) {
-        rate = parseFloat(exchangeTx.metadata.rate);
-        needToSpend = Math.ceil(refundAmount * rate);
-      }
-    }
     
     if (!wallet) {
       await client.query(
@@ -2094,11 +2074,10 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     }
     
     const currentBalance = wallet.available_balance || 0;
-    const spendAmount = Math.min(needToSpend, currentBalance);
     
     await client.query(
       'UPDATE wallets SET available_balance = available_balance - $1 WHERE user_id = $2',
-      [spendAmount, userId]
+      [refundAmount, userId]
     );
     
     await client.query(
@@ -2110,27 +2089,25 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
       `INSERT INTO wallet_transactions 
        (user_id, type, amount, description, order_id, metadata) 
        VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
-      [userId, -spendAmount, `Отмена возврата по заказу #${orderId}`, orderId, 
+      [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, 
        JSON.stringify({ 
-         cancel_refund: true, 
-         rate: rate,
-         original_refund: refundAmount,
-         spent: spendAmount,
-         remaining_debt: needToSpend - spendAmount
+         cancel_refund: true,
+         spent: Math.min(refundAmount, currentBalance),
+         remaining_debt: Math.max(0, refundAmount - currentBalance)
        })]
     );
     
-    if (spendAmount < needToSpend) {
+    if (refundAmount > currentBalance) {
+      const debtAmount = refundAmount - currentBalance;
       await client.query(
         `INSERT INTO wallet_transactions 
          (user_id, type, amount, description, order_id, metadata) 
          VALUES ($1, 'debt', $2, $3, $4, $5)`,
-        [userId, -(needToSpend - spendAmount), `Задолженность по отмене возврата #${orderId}`, orderId,
+        [userId, -debtAmount, `Задолженность по отмене возврата #${orderId}`, orderId,
          JSON.stringify({ 
            debt: true,
-           rate: rate,
            original_refund: refundAmount,
-           remaining: needToSpend - spendAmount
+           remaining: debtAmount
          })]
       );
     }
@@ -2138,18 +2115,18 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     await client.query('COMMIT');
     
     let debtText = '';
-    if (spendAmount < needToSpend) {
+    if (refundAmount > currentBalance) {
+      const debtAmount = refundAmount - currentBalance;
       debtText = `\n\n⚠️ На балансе недостаточно средств!\n` +
-        `💰 Списано: ${formatRub(spendAmount)} DCoin\n` +
-        `📉 Задолженность: ${formatRub(needToSpend - spendAmount)} DCoin\n` +
+        `💰 Списано: ${formatRub(currentBalance)} DCoin\n` +
+        `📉 Задолженность: ${formatRub(debtAmount)} DCoin\n` +
         `💳 При пополнении баланса задолженность будет списана автоматически.`;
     }
     
     const successText = `✅ Возврат отменен!\n\n` +
       `📦 Заказ: #${orderId}\n` +
       `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
-      `💎 Курс обмена: 1 RUB = ${rate} DCoin\n` +
-      `💎 Списано с DCoin баланса: ${formatRub(spendAmount)} DCoin` +
+      `💎 Списано с DCoin баланса: ${formatRub(Math.min(refundAmount, currentBalance))} DCoin` +
       debtText;
     
     await adminBot.editMessageText(successText, {
@@ -2166,15 +2143,15 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
       if (userResult.rows.length > 0) {
         const userTgId = userResult.rows[0].tg_id;
         
-        let userMessage = `ℹ️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
+        let userMessage = `⚠️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
           `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
-          `💎 Курс обмена: 1 RUB = ${rate} DCoin\n` +
-          `💎 Списано с вашего DCoin баланса: ${formatRub(spendAmount)} DCoin`;
+          `💎 Списано с вашего DCoin баланса: ${formatRub(Math.min(refundAmount, currentBalance))} DCoin`;
         
-        if (spendAmount < needToSpend) {
+        if (refundAmount > currentBalance) {
+          const debtAmount = refundAmount - currentBalance;
           userMessage += `\n\n⚠️ На вашем балансе недостаточно средств!\n` +
-            `💰 Списано: ${formatRub(spendAmount)} DCoin\n` +
-            `📉 Задолженность: ${formatRub(needToSpend - spendAmount)} DCoin\n` +
+            `💰 Списано: ${formatRub(currentBalance)} DCoin\n` +
+            `📉 Задолженность: ${formatRub(debtAmount)} DCoin\n` +
             `💳 При следующем пополнении баланса задолженность будет списана автоматически.`;
         }
         
@@ -2185,7 +2162,7 @@ async function handleConfirmCancelRefund(orderId, msg, callbackQueryId, returnPa
     }
     
     await adminBot.answerCallbackQuery(callbackQueryId, { 
-      text: spendAmount < needToSpend ? '⚠️ Возврат отменен, но есть задолженность' : '✅ Возврат отменен',
+      text: refundAmount > currentBalance ? '⚠️ Возврат отменен, но есть задолженность' : '✅ Возврат отменен',
       show_alert: false
     });
     
