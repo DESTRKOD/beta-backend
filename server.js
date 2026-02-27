@@ -20,6 +20,34 @@ const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
 app.use(cors());
+// Тестовый endpoint для проверки подключения
+app.get('/api/test', async (req, res) => {
+  try {
+    // Проверяем подключение к БД
+    const dbTest = await pool.query('SELECT NOW() as time');
+    
+    // Проверяем таблицы
+    const tables = await pool.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public'
+    `);
+    
+    res.json({
+      success: true,
+      message: 'Сервер работает!',
+      time: dbTest.rows[0].time,
+      tables: tables.rows.map(t => t.table_name),
+      database: process.env.DATABASE_URL ? 'подключена' : 'не указана'
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      database: process.env.DATABASE_URL ? 'указана' : 'не указана'
+    });
+  }
+});
 app.use(express.json());
 
 const pool = new Pool({
