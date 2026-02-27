@@ -89,6 +89,7 @@ function formatRub(n) {
 const authSessions = new Map();
 const userStates = {};
 const orderPages = {};
+const filterStates = {};
 
 async function initDB() {
   try {
@@ -823,7 +824,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n/reply [id] [текст] - ответить в диалог\n/close [id] - закрыть диалог\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -1283,38 +1284,94 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
   const offset = (page - 1) * limit;
   
   try {
-    const result = await pool.query(
-      `SELECT order_id, total, status, created_at, payment_status 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
-       ORDER BY created_at DESC 
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
+    let query = `
+      SELECT order_id, total, status, created_at, payment_status, user_id
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
     
-    const countResult = await pool.query(
-      `SELECT COUNT(*) as total 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')`
-    );
+    const queryParams = [];
+    
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        query += ` AND user_id = $${queryParams.length + 1}`;
+        queryParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        query += ` AND created_at >= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        query += ` AND created_at <= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateTo);
+      }
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+    queryParams.push(limit, offset);
+    
+    const result = await pool.query(query, queryParams);
+    
+    let countQuery = `
+      SELECT COUNT(*) as total 
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
+    
+    const countParams = [];
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        countQuery += ` AND user_id = $${countParams.length + 1}`;
+        countParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        countQuery += ` AND created_at >= $${countParams.length + 1}`;
+        countParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        countQuery += ` AND created_at <= $${countParams.length + 1}`;
+        countParams.push(filter.dateTo);
+      }
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
     
     const totalOrders = parseInt(countResult.rows[0].total);
     const totalPages = Math.ceil(totalOrders / limit);
     
     if (result.rows.length === 0) {
-      adminBot.sendMessage(msg.chat.id, '📭 Нет заказов');
+      let emptyMessage = '📭 Нет заказов';
+      if (filterStates[chatId]) {
+        emptyMessage += ' по выбранному фильтру';
+      }
+      adminBot.sendMessage(msg.chat.id, emptyMessage);
       return;
     }
     
     orderPages[chatId] = page;
     
     let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
+    if (filterStates[chatId]) {
+      ordersText += `🔍 Фильтр активен\n\n`;
+    }
     
     const inlineKeyboard = [];
     
+    inlineKeyboard.push([
+      { text: '🔍 Фильтр заказов', callback_data: 'show_filters' }
+    ]);
+    
     result.rows.forEach((order, index) => {
       const orderNumber = offset + index + 1;
-      ordersText += `${orderNumber}. #${order.order_id}\n`;
+      
+      let userInfo = '';
+      if (order.user_id) {
+        userInfo = ` (ID: ${order.user_id})`;
+      }
+      
+      ordersText += `${orderNumber}. #${order.order_id}${userInfo}\n`;
       ordersText += `   Сумма: ${formatRub(order.total)}\n`;
       ordersText += `   Статус: ${getStatusText(order.status)}\n`;
       ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
@@ -1335,6 +1392,10 @@ adminBot.onText(/\/orders(?:\s+(\d+))?/, async (msg, match) => {
     
     if (page < totalPages) {
       paginationButtons.push({ text: '➡️ Вперед', callback_data: `orders_page:${page+1}` });
+    }
+    
+    if (filterStates[chatId]) {
+      paginationButtons.push({ text: '❌ Сбросить фильтр', callback_data: 'clear_filters' });
     }
     
     if (paginationButtons.length > 0) {
@@ -1362,28 +1423,23 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
-// ЕДИНСТВЕННЫЙ обработчик сообщений для админа
 adminBot.on('message', async (msg) => {
   if (!isAdmin(msg) || !msg.text) return;
   
   const chatId = msg.chat.id;
   const text = msg.text.trim();
   
-  // Пропускаем команды (начинаются с /)
   if (text.startsWith('/')) return;
   
-  // Проверяем состояние пользователя
   const userState = userStates[chatId];
   
   if (!userState) return;
   
   console.log('📨 Получено сообщение от админа в состоянии:', userState);
   
-  // Обработка ответа в диалог поддержки
   if (userState.action === 'support_reply') {
     const dialogId = userState.dialog_id;
     
-    // Сразу очищаем состояние, чтобы можно было отвечать в другие диалоги
     delete userStates[chatId];
     
     if (!text) {
@@ -1392,7 +1448,6 @@ adminBot.on('message', async (msg) => {
     }
     
     try {
-      // Проверяем, активен ли диалог
       const dialogInfo = await pool.query(
         'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
         [dialogId, 'active']
@@ -1405,26 +1460,22 @@ adminBot.on('message', async (msg) => {
       
       const userId = dialogInfo.rows[0].user_id;
       
-      // Сохраняем ответ в БД
       const result = await pool.query(
         `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
          VALUES ($1, $2, $3, $4) RETURNING *`,
         [dialogId, userId, 'admin', text]
       );
       
-      // Обновляем время диалога
       await pool.query(
         'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
         [dialogId]
       );
       
-      // Получаем информацию о пользователе для уведомления
       const userResult = await pool.query(
         'SELECT tg_id, username FROM users WHERE id = $1',
         [userId]
       );
       
-      // Отправляем уведомление пользователю в Telegram
       if (userResult.rows.length > 0 && userResult.rows[0].tg_id) {
         try {
           await userBot.sendMessage(
@@ -1437,24 +1488,10 @@ adminBot.on('message', async (msg) => {
         }
       }
       
-      // Подтверждаем админу
       adminBot.sendMessage(
         chatId, 
         `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
       );
-      
-      // Обновляем сообщение с кнопками (опционально)
-      try {
-        const dialogMessages = await pool.query(
-          'SELECT COUNT(*) as count FROM support_messages WHERE dialog_id = $1',
-          [dialogId]
-        );
-        
-        await adminBot.sendMessage(
-          chatId,
-          `💬 Диалог #${dialogId} обновлен. Всего сообщений: ${dialogMessages.rows[0].count}`
-        );
-      } catch (e) {}
       
     } catch (error) {
       console.error('❌ Ошибка отправки ответа в поддержку:', error);
@@ -1463,82 +1500,605 @@ adminBot.on('message', async (msg) => {
     return;
   }
   
-  // Обработка изменения цены
+  else if (userState.action === 'filter_user_id') {
+    const userId = parseInt(text);
+    
+    delete userStates[chatId];
+    
+    if (isNaN(userId) || userId <= 0) {
+      adminBot.sendMessage(chatId, '❌ Некорректный ID пользователя. Фильтр не применен.');
+      return;
+    }
+    
+    filterStates[chatId] = { userId: userId };
+    adminBot.sendMessage(chatId, `✅ Фильтр применен: заказы пользователя ID ${userId}`);
+    
+    await adminBot.emit('text', { ...msg, text: '/orders 1' });
+    return;
+  }
+  
   else if (userState.action === 'edit_price') {
     await handleEditPriceStep(msg, userState);
     return;
   }
   
-  // Обработка возврата
   else if (userState.action === 'process_refund') {
     await handleRefundStep(msg, userState);
     return;
   }
   
-  // Обработка добавления товара
   else if (userState.step) {
     await handleAddProductStep(msg, userState);
     return;
   }
 });
 
-async function handleSupportReply(msg, userState) {
-  const chatId = msg.chat.id;
-  const dialogId = userState.dialog_id;
-  const replyText = msg.text.trim();
+adminBot.on('callback_query', async (callbackQuery) => {
+  const msg = callbackQuery.message;
+  const data = callbackQuery.data;
   
-  // Сразу очищаем состояние, чтобы можно было отвечать в другие диалоги
-  delete userStates[chatId];
-  
-  if (!replyText) {
-    adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
+  if (!isAdmin(callbackQuery)) {
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
+      text: '⛔ Доступ запрещен',
+      show_alert: true 
+    });
+    return;
+  }
+
+  console.log('📩 Callback получен:', data);
+
+  if (data.startsWith('support_view:')) {
+    const dialogId = data.split(':')[1];
+    await showSupportDialog(msg, dialogId, callbackQuery.id);
     return;
   }
   
-  try {
-    const dialogInfo = await pool.query(
-      'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-      [dialogId, 'active']
+  if (data.startsWith('support_userinfo:')) {
+    const userId = data.split(':')[1];
+    await showUserInfo(msg, userId, callbackQuery.id);
+    return;
+  }
+  
+  if (data === 'show_filters') {
+    await showFilterOptions(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (data === 'clear_filters') {
+    const chatId = msg.chat.id;
+    delete filterStates[chatId];
+    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '✅ Фильтр сброшен' });
+    await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
+    return;
+  }
+  
+  if (data.startsWith('filter_date:')) {
+    const filterType = data.split(':')[1];
+    await handleDateFilter(msg, filterType, callbackQuery.id);
+    return;
+  }
+  
+  if (data === 'filter_user_prompt') {
+    const chatId = msg.chat.id;
+    userStates[chatId] = {
+      action: 'filter_user_id'
+    };
+    await adminBot.editMessageText('👤 Введите ID пользователя для фильтрации заказов:', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (data.startsWith('order_detail:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const page = parts[2] || 1;
+    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (data.startsWith('orders_page:')) {
+    const page = data.split(':')[1];
+    await handleOrdersPage(msg, page, callbackQuery.id);
+    return;
+  }
+
+  const [action, value] = data.split(':');
+  
+  if (action === 'support_reply') {
+    const dialogId = parseInt(value);
+    
+    userStates[msg.chat.id] = {
+      action: 'support_reply',
+      dialog_id: dialogId
+    };
+    
+    await adminBot.sendMessage(
+      msg.chat.id,
+      `✉️ Введите ответ для диалога #${dialogId}:`
     );
     
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
+      text: '✉️ Введите ваш ответ',
+      show_alert: false 
+    });
+    return;
+  }
+  
+  else if (action === 'support_close') {
+    const dialogId = parseInt(value);
+    
+    try {
+      const dialogInfo = await pool.query(
+        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+        [dialogId, 'active']
+      );
+      
+      if (dialogInfo.rows.length > 0) {
+        const userId = dialogInfo.rows[0].user_id;
+        
+        await pool.query(
+          'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+          ['closed', dialogId]
+        );
+        
+        const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
+        
+        if (userResult.rows.length > 0) {
+          try {
+            await userBot.sendMessage(
+              userResult.rows[0].tg_id,
+              `✅ Диалог #${dialogId} был закрыт администратором.\nСпасибо за обращение!`
+            );
+          } catch (e) {
+            console.error('Ошибка уведомления пользователя:', e);
+          }
+        }
+        
+        await adminBot.editMessageText(
+          `✅ Диалог #${dialogId} успешно закрыт`,
+          {
+            chat_id: msg.chat.id,
+            message_id: msg.message_id
+          }
+        );
+        
+        await adminBot.answerCallbackQuery(callbackQuery.id, { 
+          text: '✅ Диалог закрыт',
+          show_alert: false
+        });
+      } else {
+        await adminBot.editMessageText(
+          `❌ Диалог #${dialogId} уже закрыт или не найден`,
+          {
+            chat_id: msg.chat.id,
+            message_id: msg.message_id
+          }
+        );
+        
+        await adminBot.answerCallbackQuery(callbackQuery.id, { 
+          text: '❌ Диалог уже закрыт',
+          show_alert: true 
+        });
+      }
+    } catch (error) {
+      console.error('❌ Ошибка закрытия диалога:', error);
+      await adminBot.answerCallbackQuery(callbackQuery.id, { 
+        text: '❌ Ошибка закрытия диалога',
+        show_alert: true 
+      });
+    }
+    return;
+  }
+
+  if (action === 'request_code') {
+    const orderId = value;
+    await handleRequestCode(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'order_ready') {
+    const orderId = value;
+    await handleOrderReady(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'wrong_code') {
+    const orderId = value;
+    await handleWrongCode(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'mark_completed') {
+    const orderId = value;
+    await handleMarkCompleted(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'back_to_orders') {
+    const page = value || 1;
+    await handleBackToOrders(msg, page);
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'force_complete') {
+    const orderId = value;
+    await completeOrder(orderId, msg, callbackQuery.id);
+    return;
+  }
+
+  if (action === 'cancel_order') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelOrder(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_cancel_order') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelOrder(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+
+  if (action === 'process_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleProcessRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'cancel_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_cancel_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+
+  if (action === 'add_product_prompt') {
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
+    return;
+  }
+  
+  if (action === 'edit_price_list') {
+    await handleEditPriceList(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'edit_price') {
+    const productId = value;
+    await handleEditPrice(productId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'delete_product_list') {
+    await handleDeleteProductList(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'delete_product') {
+    const productId = value;
+    await handleDeleteProduct(productId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'set_gift') {
+    const isGift = value;
+    await handleSetGift(isGift, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'cancel_add_product') {
+    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
+    await adminBot.editMessageText('❌ Добавление товара отменено.', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    return;
+  }
+
+  await adminBot.answerCallbackQuery(callbackQuery.id, { 
+    text: '⚠️ Неизвестная команда',
+    show_alert: true 
+  });
+});
+
+async function showFilterOptions(msg, callbackQueryId) {
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: '📅 Сегодня', callback_data: 'filter_date:today' },
+        { text: '📅 Вчера', callback_data: 'filter_date:yesterday' }
+      ],
+      [
+        { text: '📅 Эта неделя', callback_data: 'filter_date:week' },
+        { text: '📅 Этот месяц', callback_data: 'filter_date:month' }
+      ],
+      [
+        { text: '👤 По ID пользователя', callback_data: 'filter_user_prompt' }
+      ],
+      [
+        { text: '❌ Сбросить фильтр', callback_data: 'clear_filters' }
+      ]
+    ]
+  };
+  
+  await adminBot.editMessageText('🔍 Выберите тип фильтрации:', {
+    chat_id: msg.chat.id,
+    message_id: msg.message_id,
+    reply_markup: keyboard
+  });
+  
+  await adminBot.answerCallbackQuery(callbackQueryId);
+}
+
+async function handleDateFilter(msg, filterType, callbackQueryId) {
+  const chatId = msg.chat.id;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  
+  let dateFrom, dateTo;
+  
+  switch(filterType) {
+    case 'today':
+      dateFrom = today;
+      dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+      break;
+    case 'yesterday':
+      dateFrom = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+      dateTo = new Date(today.getTime() - 1);
+      break;
+    case 'week':
+      const firstDayOfWeek = today.getDate() - today.getDay() + (today.getDay() === 0 ? -6 : 1);
+      dateFrom = new Date(today.getFullYear(), today.getMonth(), firstDayOfWeek);
+      dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+      break;
+    case 'month':
+      dateFrom = new Date(today.getFullYear(), today.getMonth(), 1);
+      dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+      break;
+  }
+  
+  filterStates[chatId] = {
+    dateFrom: dateFrom,
+    dateTo: dateTo
+  };
+  
+  const filterNames = {
+    today: 'сегодня',
+    yesterday: 'вчера',
+    week: 'эту неделю',
+    month: 'этот месяц'
+  };
+  
+  await adminBot.answerCallbackQuery(callbackQueryId, { 
+    text: `✅ Фильтр применен: ${filterNames[filterType]}` 
+  });
+  
+  await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
+}
+
+async function showSupportDialog(msg, dialogId, callbackQueryId) {
+  try {
+    const dialogInfo = await pool.query(`
+      SELECT 
+        d.*,
+        u.id as user_id,
+        u.username,
+        u.tg_id,
+        u.telegram_username,
+        u.first_name,
+        u.last_name,
+        u.avatar_url
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.id = $1
+    `, [dialogId]);
+    
     if (dialogInfo.rows.length === 0) {
-      adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Диалог не найден',
+        show_alert: true 
+      });
       return;
     }
     
-    const userId = dialogInfo.rows[0].user_id;
+    const dialog = dialogInfo.rows[0];
     
-    await pool.query(
-      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
-       VALUES ($1, $2, $3, $4)`,
-      [dialogId, userId, 'admin', replyText]
-    );
+    const messages = await pool.query(`
+      SELECT * FROM support_messages 
+      WHERE dialog_id = $1 
+      ORDER BY created_at ASC
+    `, [dialogId]);
     
-    await pool.query(
-      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [dialogId]
-    );
+    let docContent = `ДИАЛОГ ПОДДЕРЖКИ #${dialogId}\n`;
+    docContent += `================================\n\n`;
+    docContent += `ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:\n`;
+    docContent += `• ID в магазине: ${dialog.user_id}\n`;
+    docContent += `• Имя: ${dialog.username || 'Не указано'}\n`;
+    docContent += `• TG ID: ${dialog.tg_id}\n`;
+    docContent += `• Username: @${dialog.telegram_username || 'отсутствует'}\n`;
+    docContent += `• Имя в TG: ${dialog.first_name || ''} ${dialog.last_name || ''}`.trim() || 'Не указано';
+    docContent += `\n\nИСТОРИЯ ПЕРЕПИСКИ:\n`;
+    docContent += `================================\n\n`;
     
-    const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
+    messages.rows.forEach(msg => {
+      const date = new Date(msg.created_at).toLocaleString('ru-RU');
+      const sender = msg.sender === 'user' ? '👤 ПОЛЬЗОВАТЕЛЬ' : '🛠️ ПОДДЕРЖКА';
+      docContent += `[${date}] ${sender}:\n${msg.message}\n\n`;
+    });
     
-    if (userResult.rows.length > 0) {
-      try {
-        await userBot.sendMessage(
-          userResult.rows[0].tg_id,
-          `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${replyText}\n\nОтветить можно в чате на сайте.`
-        );
-      } catch (e) {
-        console.error('Ошибка отправки уведомления:', e);
+    docContent += `================================\n`;
+    docContent += `Статус диалога: ${dialog.status === 'active' ? 'Активен' : 'Закрыт'}\n`;
+    docContent += `Создан: ${new Date(dialog.created_at).toLocaleString('ru-RU')}\n`;
+    docContent += `Обновлен: ${new Date(dialog.updated_at).toLocaleString('ru-RU')}`;
+    
+    await adminBot.sendDocument(
+      msg.chat.id,
+      Buffer.from(docContent, 'utf-8'),
+      {
+        filename: `support_dialog_${dialogId}.txt`,
+        caption: `💬 Диалог #${dialogId} с пользователем ${dialog.username || 'ID ' + dialog.user_id}`
       }
-    }
+    );
     
-    adminBot.sendMessage(chatId, `✅ Ответ отправлен в диалог #${dialogId}`);
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
+        ],
+        [
+          { text: '👤 Инфо о клиенте', callback_data: `support_userinfo:${dialog.user_id}` }
+        ]
+      ]
+    };
+    
+    let statusText = `📋 **Управление диалогом #${dialogId}**\n\n`;
+    statusText += `**Пользователь:** ${dialog.username || 'Неизвестно'}\n`;
+    statusText += `**Статус:** ${dialog.status === 'active' ? '✅ Активен' : '❌ Закрыт'}\n`;
+    statusText += `**Сообщений:** ${messages.rows.length}\n`;
+    
+    await adminBot.sendMessage(msg.chat.id, statusText, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+    
+    await adminBot.answerCallbackQuery(callbackQueryId);
     
   } catch (error) {
-    console.error('Ошибка отправки ответа:', error);
-    adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа');
+    console.error('❌ Ошибка показа диалога:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка загрузки диалога',
+      show_alert: true 
+    });
   }
 }
+
+async function showUserInfo(msg, userId, callbackQueryId) {
+  try {
+    const userResult = await pool.query(`
+      SELECT u.*, 
+             (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as orders_count,
+             (SELECT SUM(total) FROM orders WHERE user_id = u.id AND payment_status = 'confirmed') as total_spent,
+             (SELECT COUNT(*) FROM support_dialogs WHERE user_id = u.id) as dialogs_count
+      FROM users u
+      WHERE u.id = $1
+    `, [userId]);
+    
+    if (userResult.rows.length === 0) {
+      await adminBot.answerCallbackQuery(callbackQueryId, { 
+        text: '❌ Пользователь не найден',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    const user = userResult.rows[0];
+    
+    let infoText = `👤 **Информация о пользователе**\n\n`;
+    infoText += `**ID в магазине:** ${user.id}\n`;
+    infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
+    infoText += `**TG ID:** ${user.tg_id}\n`;
+    infoText += `**Telegram Username:** @${user.telegram_username || 'отсутствует'}\n`;
+    infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
+    infoText += `\n\n**Статистика:**\n`;
+    infoText += `• Заказов: ${user.orders_count || 0}\n`;
+    infoText += `• Потрачено: ${formatRub(user.total_spent || 0)}\n`;
+    infoText += `• Обращений в поддержку: ${user.dialogs_count || 0}\n`;
+    infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
+    infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
+    
+    await adminBot.sendMessage(msg.chat.id, infoText, { parse_mode: 'Markdown' });
+    await adminBot.answerCallbackQuery(callbackQueryId);
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения инфо о пользователе:', error);
+    await adminBot.answerCallbackQuery(callbackQueryId, { 
+      text: '❌ Ошибка',
+      show_alert: true 
+    });
+  }
+}
+
+adminBot.onText(/\/dialogs/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const dialogs = await pool.query(`
+      SELECT 
+        d.id, 
+        d.status, 
+        d.updated_at,
+        u.id as user_id,
+        u.username,
+        u.tg_id,
+        u.telegram_username,
+        (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id) as msg_count
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.status = 'active'
+      ORDER BY d.updated_at DESC
+    `);
+    
+    const totalDialogs = dialogs.rows.length;
+    
+    if (totalDialogs === 0) {
+      await adminBot.sendMessage(msg.chat.id, '📭 Нет активных обращений в поддержку.');
+      return;
+    }
+    
+    let statsText = `📊 **Всего обращений:** ${totalDialogs}\n\n`;
+    statsText += `👇 **Выберите диалог:**`;
+    
+    const keyboard = {
+      inline_keyboard: dialogs.rows.map(d => {
+        const date = new Date(d.updated_at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+        const userName = d.username || `ID ${d.user_id}`;
+        const shortName = userName.length > 15 ? userName.substring(0, 12) + '…' : userName;
+        
+        return [{
+          text: `#${d.id} | ${shortName} | (${d.msg_count} сообщ.) | ${date}`,
+          callback_data: `support_view:${d.id}`
+        }];
+      })
+    };
+    
+    await adminBot.sendMessage(msg.chat.id, statsText, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения диалогов:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка обращений.');
+  }
+});
 
 async function handleEditPriceStep(msg, userState) {
   const chatId = msg.chat.id;
@@ -1639,403 +2199,65 @@ async function handleAddProductStep(msg, userState) {
   }
 }
 
-adminBot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
-  
-  if (!isAdmin(callbackQuery)) {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '⛔ Доступ запрещен',
-      show_alert: true 
-    });
-    return;
-  }
-
-  console.log('📩 Callback получен:', data);
-
-  // Обработка заказов
-  if (data.startsWith('order_detail:')) {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const page = parts[2] || 1;
-    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-  
-  if (data.startsWith('orders_page:')) {
-    const page = data.split(':')[1];
-    await handleOrdersPage(msg, page, callbackQuery.id);
-    return;
-  }
-
-  // Разбираем action и value
-  const [action, value] = data.split(':');
-  
-  // Обработка поддержки
-  if (action === 'support_reply') {
-    const dialogId = parseInt(value);
-    
-    // Сохраняем состояние для ответа
-    userStates[msg.chat.id] = {
-      action: 'support_reply',
-      dialog_id: dialogId
-    };
-    
-    await adminBot.sendMessage(
-      msg.chat.id,
-      `✉️ Введите ответ для диалога #${dialogId}:`
-    );
-    
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '✉️ Введите ваш ответ',
-      show_alert: false 
-    });
-    return;
-  }
-  
-  else if (action === 'support_close') {
-    const dialogId = parseInt(value);
-    
-    try {
-      // Получаем информацию о диалоге перед закрытием
-      const dialogInfo = await pool.query(
-        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-        [dialogId, 'active']
-      );
-      
-      if (dialogInfo.rows.length > 0) {
-        const userId = dialogInfo.rows[0].user_id;
-        
-        // Закрываем диалог
-        await pool.query(
-          'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-          ['closed', dialogId]
-        );
-        
-        // Уведомляем пользователя
-        const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
-        
-        if (userResult.rows.length > 0) {
-          try {
-            await userBot.sendMessage(
-              userResult.rows[0].tg_id,
-              `✅ Диалог #${dialogId} был закрыт администратором.\nСпасибо за обращение!`
-            );
-          } catch (e) {
-            console.error('Ошибка уведомления пользователя:', e);
-          }
-        }
-        
-        // Обновляем сообщение
-        await adminBot.editMessageText(
-          `✅ Диалог #${dialogId} успешно закрыт`,
-          {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id
-          }
-        );
-        
-        await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '✅ Диалог закрыт',
-          show_alert: false
-        });
-      } else {
-        await adminBot.editMessageText(
-          `❌ Диалог #${dialogId} уже закрыт или не найден`,
-          {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id
-          }
-        );
-        
-        await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '❌ Диалог уже закрыт',
-          show_alert: true 
-        });
-      }
-    } catch (error) {
-      console.error('❌ Ошибка закрытия диалога:', error);
-      await adminBot.answerCallbackQuery(callbackQuery.id, { 
-        text: '❌ Ошибка закрытия диалога',
-        show_alert: true 
-      });
-    }
-    return;
-  }
-
-  // Обработка кодов и заказов
-  if (action === 'request_code') {
-    const orderId = value;
-    await handleRequestCode(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'order_ready') {
-    const orderId = value;
-    await handleOrderReady(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'wrong_code') {
-    const orderId = value;
-    await handleWrongCode(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'mark_completed') {
-    const orderId = value;
-    await handleMarkCompleted(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'back_to_orders') {
-    const page = value || 1;
-    await handleBackToOrders(msg, page);
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'force_complete') {
-    const orderId = value;
-    await completeOrder(orderId, msg, callbackQuery.id);
-    return;
-  }
-
-  // Обработка отмены заказа
-  if (action === 'cancel_order') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleCancelOrder(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_cancel_order') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmCancelOrder(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-
-  // Обработка возвратов
-  if (action === 'process_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleProcessRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'cancel_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleCancelRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_cancel_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmCancelRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-
-  // Обработка товаров
-  if (action === 'add_product_prompt') {
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
-    return;
-  }
-  
-  if (action === 'edit_price_list') {
-    await handleEditPriceList(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'edit_price') {
-    const productId = value;
-    await handleEditPrice(productId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'delete_product_list') {
-    await handleDeleteProductList(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'delete_product') {
-    const productId = value;
-    await handleDeleteProduct(productId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'set_gift') {
-    const isGift = value;
-    await handleSetGift(isGift, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'cancel_add_product') {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
-    await adminBot.editMessageText('❌ Добавление товара отменено.', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    return;
-  }
-
-  // Если ничего не подошло
-  await adminBot.answerCallbackQuery(callbackQuery.id, { 
-    text: '⚠️ Неизвестная команда',
-    show_alert: true 
-  });
-});
-
-adminBot.onText(/\/reply_(\d+)(?:\s+(.+))?/, async (msg, match) => {
-  if (!isAdmin(msg)) return;
-  
-  const dialogId = parseInt(match[1]);
-  const replyText = match[2];
-  
-  if (!replyText) {
-    userStates[msg.chat.id] = {
-      action: 'support_reply',
-      dialog_id: dialogId
-    };
-    adminBot.sendMessage(msg.chat.id, `✉️ Введите ответ для диалога #${dialogId}:`);
-    return;
-  }
-  
-  try {
-    const dialogInfo = await pool.query(
-      'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-      [dialogId, 'active']
-    );
-    
-    if (dialogInfo.rows.length === 0) {
-      adminBot.sendMessage(msg.chat.id, '❌ Диалог не найден или уже закрыт');
-      return;
-    }
-    
-    const userId = dialogInfo.rows[0].user_id;
-    
-    await pool.query(
-      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
-       VALUES ($1, $2, $3, $4)`,
-      [dialogId, userId, 'admin', replyText]
-    );
-    
-    await pool.query(
-      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [dialogId]
-    );
-    
-    const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
-    
-    if (userResult.rows.length > 0) {
-      try {
-        await userBot.sendMessage(
-          userResult.rows[0].tg_id,
-          `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${replyText}\n\nОтветить можно в чате на сайте.`
-        );
-      } catch (e) {}
-    }
-    
-    adminBot.sendMessage(msg.chat.id, `✅ Ответ отправлен в диалог #${dialogId}`);
-    
-  } catch (error) {
-    console.error('Ошибка:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при отправке ответа');
-  }
-});
-
-adminBot.onText(/\/dialogs/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  
-  try {
-    const dialogs = await pool.query(`
-      SELECT d.*, u.username, 
-             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.status = 'active'
-      ORDER BY d.updated_at DESC
-    `);
-    
-    if (dialogs.rows.length === 0) {
-      adminBot.sendMessage(msg.chat.id, '📭 Нет активных диалогов');
-      return;
-    }
-    
-    let text = '💬 Активные диалоги:\n\n';
-    
-    for (const d of dialogs.rows) {
-      text += `#${d.id} | 👤 ${d.username}\n`;
-      text += `📅 ${new Date(d.updated_at).toLocaleString('ru-RU')}\n`;
-      if (d.unread > 0) text += `✉️ Новых: ${d.unread}\n`;
-      text += `🔹 /reply_${d.id} - ответить\n`;
-      text += `🔹 /close_${d.id} - закрыть\n\n`;
-    }
-    
-    adminBot.sendMessage(msg.chat.id, text);
-    
-  } catch (error) {
-    console.error('Ошибка получения диалогов:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка получения диалогов');
-  }
-});
-
-adminBot.onText(/\/close_(\d+)/, async (msg, match) => {
-  if (!isAdmin(msg)) return;
-  
-  const dialogId = parseInt(match[1]);
-  
-  try {
-    await pool.query(
-      'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-      ['closed', dialogId]
-    );
-    
-    adminBot.sendMessage(msg.chat.id, `✅ Диалог #${dialogId} закрыт`);
-    
-  } catch (error) {
-    console.error('Ошибка закрытия диалога:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка закрытия диалога');
-  }
-});
-
 async function handleOrdersPage(msg, page, callbackQueryId) {
   try {
     const chatId = msg.chat.id;
     const limit = 10;
     const offset = (page - 1) * limit;
     
-    const result = await pool.query(
-      `SELECT order_id, total, status, created_at, payment_status 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
-       ORDER BY created_at DESC 
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
+    let query = `
+      SELECT order_id, total, status, created_at, payment_status, user_id
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
     
-    const countResult = await pool.query(
-      `SELECT COUNT(*) as total 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')`
-    );
+    const queryParams = [];
+    
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        query += ` AND user_id = $${queryParams.length + 1}`;
+        queryParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        query += ` AND created_at >= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        query += ` AND created_at <= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateTo);
+      }
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+    queryParams.push(limit, offset);
+    
+    const result = await pool.query(query, queryParams);
+    
+    let countQuery = `
+      SELECT COUNT(*) as total 
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
+    
+    const countParams = [];
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        countQuery += ` AND user_id = $${countParams.length + 1}`;
+        countParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        countQuery += ` AND created_at >= $${countParams.length + 1}`;
+        countParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        countQuery += ` AND created_at <= $${countParams.length + 1}`;
+        countParams.push(filter.dateTo);
+      }
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
     
     const totalOrders = parseInt(countResult.rows[0].total);
     const totalPages = Math.ceil(totalOrders / limit);
@@ -2051,12 +2273,25 @@ async function handleOrdersPage(msg, page, callbackQueryId) {
     orderPages[chatId] = parseInt(page);
     
     let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
+    if (filterStates[chatId]) {
+      ordersText += `🔍 Фильтр активен\n\n`;
+    }
     
     const inlineKeyboard = [];
     
+    inlineKeyboard.push([
+      { text: '🔍 Фильтр заказов', callback_data: 'show_filters' }
+    ]);
+    
     result.rows.forEach((order, index) => {
       const orderNumber = offset + index + 1;
-      ordersText += `${orderNumber}. #${order.order_id}\n`;
+      
+      let userInfo = '';
+      if (order.user_id) {
+        userInfo = ` (ID: ${order.user_id})`;
+      }
+      
+      ordersText += `${orderNumber}. #${order.order_id}${userInfo}\n`;
       ordersText += `   Сумма: ${formatRub(order.total)}\n`;
       ordersText += `   Статус: ${getStatusText(order.status)}\n`;
       ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
@@ -2077,6 +2312,10 @@ async function handleOrdersPage(msg, page, callbackQueryId) {
     
     if (page < totalPages) {
       paginationButtons.push({ text: '➡️ Вперед', callback_data: `orders_page:${parseInt(page)+1}` });
+    }
+    
+    if (filterStates[chatId]) {
+      paginationButtons.push({ text: '❌ Сбросить фильтр', callback_data: 'clear_filters' });
     }
     
     if (paginationButtons.length > 0) {
@@ -2213,7 +2452,7 @@ async function handleProcessRefund(orderId, msg, callbackQueryId, returnPage = 1
       reply_markup: confirmKeyboard
     });
     
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
       text: 'Подтвердите оформление возврата',
       show_alert: false 
     });
@@ -2268,7 +2507,7 @@ async function handleConfirmRefund(orderId, msg, callbackQueryId, returnPage = 1
       message_id: msg.message_id
     });
     
-    await adminBot.answerCallbackQuery(callbackQueryId, { 
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
       text: 'Введите сумму возврата',
       show_alert: false
     });
@@ -3135,20 +3374,59 @@ async function handleBackToOrders(msg, page = 1) {
     const limit = 10;
     const offset = (page - 1) * limit;
     
-    const result = await pool.query(
-      `SELECT order_id, total, status, created_at, payment_status 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
-       ORDER BY created_at DESC 
-       LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
+    let query = `
+      SELECT order_id, total, status, created_at, payment_status, user_id
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
     
-    const countResult = await pool.query(
-      `SELECT COUNT(*) as total 
-       FROM orders 
-       WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')`
-    );
+    const queryParams = [];
+    
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        query += ` AND user_id = $${queryParams.length + 1}`;
+        queryParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        query += ` AND created_at >= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        query += ` AND created_at <= $${queryParams.length + 1}`;
+        queryParams.push(filter.dateTo);
+      }
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+    queryParams.push(limit, offset);
+    
+    const result = await pool.query(query, queryParams);
+    
+    let countQuery = `
+      SELECT COUNT(*) as total 
+      FROM orders 
+      WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+    `;
+    
+    const countParams = [];
+    if (filterStates[chatId]) {
+      const filter = filterStates[chatId];
+      if (filter.userId) {
+        countQuery += ` AND user_id = $${countParams.length + 1}`;
+        countParams.push(filter.userId);
+      }
+      if (filter.dateFrom) {
+        countQuery += ` AND created_at >= $${countParams.length + 1}`;
+        countParams.push(filter.dateFrom);
+      }
+      if (filter.dateTo) {
+        countQuery += ` AND created_at <= $${countParams.length + 1}`;
+        countParams.push(filter.dateTo);
+      }
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
     
     const totalOrders = parseInt(countResult.rows[0].total);
     const totalPages = Math.ceil(totalOrders / limit);
@@ -3164,12 +3442,25 @@ async function handleBackToOrders(msg, page = 1) {
     orderPages[chatId] = page;
     
     let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
+    if (filterStates[chatId]) {
+      ordersText += `🔍 Фильтр активен\n\n`;
+    }
     
     const inlineKeyboard = [];
     
+    inlineKeyboard.push([
+      { text: '🔍 Фильтр заказов', callback_data: 'show_filters' }
+    ]);
+    
     result.rows.forEach((order, index) => {
       const orderNumber = offset + index + 1;
-      ordersText += `${orderNumber}. #${order.order_id}\n`;
+      
+      let userInfo = '';
+      if (order.user_id) {
+        userInfo = ` (ID: ${order.user_id})`;
+      }
+      
+      ordersText += `${orderNumber}. #${order.order_id}${userInfo}\n`;
       ordersText += `   Сумма: ${formatRub(order.total)}\n`;
       ordersText += `   Статус: ${getStatusText(order.status)}\n`;
       ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
@@ -3190,6 +3481,10 @@ async function handleBackToOrders(msg, page = 1) {
     
     if (page < totalPages) {
       paginationButtons.push({ text: '➡️ Вперед', callback_data: `orders_page:${page+1}` });
+    }
+    
+    if (filterStates[chatId]) {
+      paginationButtons.push({ text: '❌ Сбросить фильтр', callback_data: 'clear_filters' });
     }
     
     if (paginationButtons.length > 0) {
