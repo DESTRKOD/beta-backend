@@ -1387,6 +1387,9 @@ async function handleSupportReply(msg, userState) {
   const dialogId = userState.dialog_id;
   const replyText = msg.text.trim();
   
+  // Сразу очищаем состояние, чтобы можно было отвечать в другие диалоги
+  delete userStates[chatId];
+  
   if (!replyText) {
     adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
     return;
@@ -1400,7 +1403,6 @@ async function handleSupportReply(msg, userState) {
     
     if (dialogInfo.rows.length === 0) {
       adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
-      delete userStates[chatId];
       return;
     }
     
@@ -1436,8 +1438,6 @@ async function handleSupportReply(msg, userState) {
     console.error('Ошибка отправки ответа:', error);
     adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа');
   }
-  
-  delete userStates[chatId];
 }
 
 async function handleEditPriceStep(msg, userState) {
@@ -1550,7 +1550,10 @@ adminBot.on('callback_query', async (callbackQuery) => {
     });
     return;
   }
-  
+
+  console.log('📩 Callback получен:', data);
+
+  // Обработка заказов
   if (data.startsWith('order_detail:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -1565,108 +1568,239 @@ adminBot.on('callback_query', async (callbackQuery) => {
     await handleOrdersPage(msg, page, callbackQuery.id);
     return;
   }
+
+  // Разбираем action и value
+  const [action, value] = data.split(':');
   
-  const [action, ...params] = data.split(':');
+  // Обработка поддержки
+  if (action === 'support_reply') {
+    const dialogId = parseInt(value);
+    
+    // Сохраняем состояние для ответа
+    userStates[msg.chat.id] = {
+      action: 'support_reply',
+      dialog_id: dialogId
+    };
+    
+    await adminBot.sendMessage(
+      msg.chat.id,
+      `✉️ Введите ответ для диалога #${dialogId}:`
+    );
+    
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
+      text: '✉️ Введите ваш ответ',
+      show_alert: false 
+    });
+    return;
+  }
   
-  switch(action) {
-    case 'request_code':
-      await handleRequestCode(params[0], msg, callbackQuery.id);
-      break;
-    case 'order_ready':
-      await handleOrderReady(params[0], msg, callbackQuery.id);
-      break;
-    case 'wrong_code':
-      await handleWrongCode(params[0], msg, callbackQuery.id);
-      break;
-    case 'mark_completed':
-      await handleMarkCompleted(params[0], msg, callbackQuery.id);
-      break;
-    case 'back_to_orders':
-      await handleBackToOrders(msg, params[0]);
-      await adminBot.answerCallbackQuery(callbackQuery.id);
-      break;
-    case 'force_complete':
-      await completeOrder(params[0], msg, callbackQuery.id);
-      break;
-    case 'cancel_order':
-      await handleCancelOrder(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'confirm_cancel_order':
-      await handleConfirmCancelOrder(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'process_refund':
-      await handleProcessRefund(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'confirm_refund':
-      await handleConfirmRefund(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'cancel_refund':
-      await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'confirm_cancel_refund':
-      await handleConfirmCancelRefund(params[0], msg, callbackQuery.id, params[1]);
-      break;
-    case 'add_product_prompt':
-      await adminBot.answerCallbackQuery(callbackQuery.id);
-      adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
-      break;
-    case 'edit_price_list':
-      await handleEditPriceList(msg, callbackQuery.id);
-      break;
-    case 'edit_price':
-      await handleEditPrice(params[0], msg, callbackQuery.id);
-      break;
-    case 'delete_product_list':
-      await handleDeleteProductList(msg, callbackQuery.id);
-      break;
-    case 'delete_product':
-      await handleDeleteProduct(params[0], msg, callbackQuery.id);
-      break;
-    case 'set_gift':
-      await handleSetGift(params[0], msg, callbackQuery.id);
-      break;
-    case 'cancel_add_product':
-      await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
-      await adminBot.editMessageText('❌ Добавление товара отменено.', {
-        chat_id: msg.chat.id,
-        message_id: msg.message_id
-      });
-      break;
-    case 'support_reply':
-      const dialogId = parseInt(params[0]);
-      userStates[msg.chat.id] = {
-        action: 'support_reply',
-        dialog_id: dialogId
-      };
-      await adminBot.sendMessage(msg.chat.id, `✉️ Введите ответ для диалога #${dialogId}:`);
-      await adminBot.answerCallbackQuery(callbackQuery.id);
-      break;
-    case 'support_close':
-      const closeDialogId = parseInt(params[0]);
-      try {
+  else if (action === 'support_close') {
+    const dialogId = parseInt(value);
+    
+    try {
+      // Получаем информацию о диалоге перед закрытием
+      const dialogInfo = await pool.query(
+        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+        [dialogId, 'active']
+      );
+      
+      if (dialogInfo.rows.length > 0) {
+        const userId = dialogInfo.rows[0].user_id;
+        
+        // Закрываем диалог
         await pool.query(
           'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-          ['closed', closeDialogId]
+          ['closed', dialogId]
         );
-        await adminBot.editMessageText(`✅ Диалог #${closeDialogId} закрыт`, {
-          chat_id: msg.chat.id,
-          message_id: msg.message_id
-        });
-        await adminBot.answerCallbackQuery(callbackQuery.id);
-      } catch (error) {
-        console.error('Ошибка закрытия диалога:', error);
+        
+        // Уведомляем пользователя
+        const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
+        
+        if (userResult.rows.length > 0) {
+          try {
+            await userBot.sendMessage(
+              userResult.rows[0].tg_id,
+              `✅ Диалог #${dialogId} был закрыт администратором.\nСпасибо за обращение!`
+            );
+          } catch (e) {
+            console.error('Ошибка уведомления пользователя:', e);
+          }
+        }
+        
+        // Обновляем сообщение
+        await adminBot.editMessageText(
+          `✅ Диалог #${dialogId} успешно закрыт`,
+          {
+            chat_id: msg.chat.id,
+            message_id: msg.message_id
+          }
+        );
+        
         await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '❌ Ошибка',
+          text: '✅ Диалог закрыт',
+          show_alert: false
+        });
+      } else {
+        await adminBot.editMessageText(
+          `❌ Диалог #${dialogId} уже закрыт или не найден`,
+          {
+            chat_id: msg.chat.id,
+            message_id: msg.message_id
+          }
+        );
+        
+        await adminBot.answerCallbackQuery(callbackQuery.id, { 
+          text: '❌ Диалог уже закрыт',
           show_alert: true 
         });
       }
-      break;
-    default:
+    } catch (error) {
+      console.error('❌ Ошибка закрытия диалога:', error);
       await adminBot.answerCallbackQuery(callbackQuery.id, { 
-        text: '⚠️ Неизвестная команда',
+        text: '❌ Ошибка закрытия диалога',
         show_alert: true 
       });
+    }
+    return;
   }
+
+  // Обработка кодов и заказов
+  if (action === 'request_code') {
+    const orderId = value;
+    await handleRequestCode(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'order_ready') {
+    const orderId = value;
+    await handleOrderReady(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'wrong_code') {
+    const orderId = value;
+    await handleWrongCode(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'mark_completed') {
+    const orderId = value;
+    await handleMarkCompleted(orderId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'back_to_orders') {
+    const page = value || 1;
+    await handleBackToOrders(msg, page);
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'force_complete') {
+    const orderId = value;
+    await completeOrder(orderId, msg, callbackQuery.id);
+    return;
+  }
+
+  // Обработка отмены заказа
+  if (action === 'cancel_order') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelOrder(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_cancel_order') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelOrder(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+
+  // Обработка возвратов
+  if (action === 'process_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleProcessRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'cancel_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+  
+  if (action === 'confirm_cancel_refund') {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelRefund(orderId, msg, callbackQuery.id, returnPage);
+    return;
+  }
+
+  // Обработка товаров
+  if (action === 'add_product_prompt') {
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
+    return;
+  }
+  
+  if (action === 'edit_price_list') {
+    await handleEditPriceList(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'edit_price') {
+    const productId = value;
+    await handleEditPrice(productId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'delete_product_list') {
+    await handleDeleteProductList(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'delete_product') {
+    const productId = value;
+    await handleDeleteProduct(productId, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'set_gift') {
+    const isGift = value;
+    await handleSetGift(isGift, msg, callbackQuery.id);
+    return;
+  }
+  
+  if (action === 'cancel_add_product') {
+    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
+    await adminBot.editMessageText('❌ Добавление товара отменено.', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    return;
+  }
+
+  // Если ничего не подошло
+  await adminBot.answerCallbackQuery(callbackQuery.id, { 
+    text: '⚠️ Неизвестная команда',
+    show_alert: true 
+  });
 });
 
 adminBot.onText(/\/reply_(\d+)(?:\s+(.+))?/, async (msg, match) => {
