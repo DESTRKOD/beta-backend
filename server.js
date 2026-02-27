@@ -20,34 +20,6 @@ const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
 app.use(cors());
-// Тестовый endpoint для проверки подключения
-app.get('/api/test', async (req, res) => {
-  try {
-    // Проверяем подключение к БД
-    const dbTest = await pool.query('SELECT NOW() as time');
-    
-    // Проверяем таблицы
-    const tables = await pool.query(`
-      SELECT table_name 
-      FROM information_schema.tables 
-      WHERE table_schema = 'public'
-    `);
-    
-    res.json({
-      success: true,
-      message: 'Сервер работает!',
-      time: dbTest.rows[0].time,
-      tables: tables.rows.map(t => t.table_name),
-      database: process.env.DATABASE_URL ? 'подключена' : 'не указана'
-    });
-  } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      database: process.env.DATABASE_URL ? 'указана' : 'не указана'
-    });
-  }
-});
 app.use(express.json());
 
 const pool = new Pool({
@@ -57,6 +29,7 @@ const pool = new Pool({
     sslmode: 'require'
   }
 });
+
 let adminBot;
 let userBot;
 
@@ -268,81 +241,58 @@ async function initDB() {
     `);
 
     await pool.query(`
-      CREATE OR REPLACE FUNCTION auto_pay_debt()
-      RETURNS TRIGGER AS $$
-      DECLARE
-        total_debt INTEGER;
-        pay_amount INTEGER;
-        debt_record RECORD;
-      BEGIN
-        IF NEW.available_balance > OLD.available_balance THEN
-          SELECT SUM(ABS(amount)) INTO total_debt
-          FROM wallet_transactions
-          WHERE user_id = NEW.user_id AND type = 'debt';
-          
-          total_debt := COALESCE(total_debt, 0);
-          
-          IF total_debt > 0 AND NEW.available_balance > 0 THEN
-            pay_amount := LEAST(NEW.available_balance, total_debt);
-            
-            FOR debt_record IN 
-              SELECT id, amount, order_id, metadata
-              FROM wallet_transactions
-              WHERE user_id = NEW.user_id AND type = 'debt'
-              ORDER BY created_at ASC
-            LOOP
-              EXIT WHEN pay_amount <= 0;
-              
-              DECLARE
-                debt_amount INTEGER := ABS(debt_record.amount);
-                debt_pay INTEGER := LEAST(debt_amount, pay_amount);
-              BEGIN
-                UPDATE wallet_transactions
-                SET amount = amount + debt_pay,
-                    metadata = jsonb_set(
-                      COALESCE(metadata, '{}'),
-                      '{paid}',
-                      to_jsonb(COALESCE((metadata->>'paid')::int, 0) + debt_pay)
-                    )
-                WHERE id = debt_record.id;
-                
-                IF debt_pay >= debt_amount THEN
-                  UPDATE wallet_transactions
-                  SET type = 'debt_paid',
-                      metadata = metadata || '{"fully_paid": true}'
-                  WHERE id = debt_record.id;
-                END IF;
-                
-                pay_amount := pay_amount - debt_pay;
-              END;
-            END LOOP;
-            
-            INSERT INTO wallet_transactions
-            (user_id, type, amount, description, metadata)
-            VALUES (
-              NEW.user_id,
-              'debt_payment',
-              -LEAST(NEW.available_balance - NEW.available_balance + pay_amount, total_debt),
-              'Автоматическое погашение задолженности',
-              jsonb_build_object('auto_paid', true)
-            );
-            
-            NEW.available_balance := NEW.available_balance - LEAST(total_debt, OLD.available_balance + (NEW.available_balance - OLD.available_balance));
-          END IF;
-        END IF;
-        
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql;
+      CREATE TABLE IF NOT EXISTS support_dialogs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        status VARCHAR(20) DEFAULT 'active',
+        subject VARCHAR(200),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
     `);
 
     await pool.query(`
-      DROP TRIGGER IF EXISTS trigger_auto_pay_debt ON wallets;
-      CREATE TRIGGER trigger_auto_pay_debt
-        AFTER UPDATE OF available_balance ON wallets
-        FOR EACH ROW
-        EXECUTE FUNCTION auto_pay_debt();
+      CREATE TABLE IF NOT EXISTS support_messages (
+        id SERIAL PRIMARY KEY,
+        dialog_id INTEGER REFERENCES support_dialogs(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        sender VARCHAR(10) NOT NULL CHECK (sender IN ('user', 'admin')),
+        message TEXT NOT NULL,
+        read BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
     `);
+
+    try {
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_user_id ON support_dialogs(user_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_status ON support_dialogs(status)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_messages_dialog_id ON support_messages(dialog_id)');
+      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_messages_created_at ON support_messages(created_at DESC)');
+    } catch (e) {
+      console.log('Индексы support уже существуют:', e.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE OR REPLACE FUNCTION update_support_timestamp()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          NEW.updated_at = CURRENT_TIMESTAMP;
+          RETURN NEW;
+        END;
+        $$ language 'plpgsql';
+      `);
+
+      await pool.query(`
+        DROP TRIGGER IF EXISTS update_support_timestamp ON support_dialogs;
+        CREATE TRIGGER update_support_timestamp
+          BEFORE UPDATE ON support_dialogs
+          FOR EACH ROW
+          EXECUTE FUNCTION update_support_timestamp();
+      `);
+    } catch (e) {
+      console.log('Ошибка создания триггера для support_dialogs:', e.message);
+    }
 
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
@@ -873,7 +823,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n/reply [id] [текст] - ответить в диалог\n/close [id] - закрыть диалог\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -908,7 +858,6 @@ adminBot.onText(/\/setrate(?:\s+(\d+(?:\.\d+)?))?/, async (msg, match) => {
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при установке курса');
   }
 });
-
 
 adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
@@ -1175,7 +1124,6 @@ adminBot.onText(/\/rate/, async (msg) => {
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении курса');
   }
 });
-
 
 adminBot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -3251,7 +3199,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
-
 app.get('/api/auth/profile', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -3316,6 +3263,7 @@ app.get('/api/auth/profile', async (req, res) => {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
+
 app.post('/api/auth/logout', async (req, res) => {
   try {
     res.json({
@@ -3744,6 +3692,324 @@ app.get('/api/firebase-config', (req, res) => {
       measurementId: process.env.FIREBASE_MEASUREMENT_ID
     }
   });
+});
+
+app.get('/api/support/dialogs', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT d.*, u.username, 
+             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.status = 'active'
+      ORDER BY d.updated_at DESC
+    `);
+    
+    res.json({
+      success: true,
+      dialogs: result.rows
+    });
+  } catch (error) {
+    console.error('Ошибка получения диалогов:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/messages/:dialogId', async (req, res) => {
+  try {
+    const { dialogId } = req.params;
+    
+    const dialogResult = await pool.query(
+      'SELECT user_id FROM support_dialogs WHERE id = $1',
+      [dialogId]
+    );
+    
+    if (dialogResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Dialog not found' });
+    }
+    
+    const messages = await pool.query(`
+      SELECT * FROM support_messages 
+      WHERE dialog_id = $1 
+      ORDER BY created_at ASC
+    `, [dialogId]);
+    
+    res.json({
+      success: true,
+      messages: messages.rows
+    });
+  } catch (error) {
+    console.error('Ошибка получения сообщений:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/api/support/message', async (req, res) => {
+  try {
+    const { user_id, message, dialog_id } = req.body;
+    
+    if (!user_id || !message) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    let dialogId = dialog_id;
+    
+    if (!dialogId) {
+      const existingDialog = await pool.query(
+        'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+        [user_id, 'active']
+      );
+      
+      if (existingDialog.rows.length > 0) {
+        dialogId = existingDialog.rows[0].id;
+      } else {
+        const newDialog = await pool.query(
+          'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
+          [user_id, 'active']
+        );
+        dialogId = newDialog.rows[0].id;
+      }
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [dialogId, user_id, 'user', message]
+    );
+    
+    await pool.query(
+      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [dialogId]
+    );
+    
+    const userResult = await pool.query(
+      'SELECT username FROM users WHERE id = $1',
+      [user_id]
+    );
+    
+    const username = userResult.rows[0]?.username || `ID ${user_id}`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
+        ]
+      ]
+    };
+    
+    await adminBot.sendMessage(
+      ADMIN_ID,
+      `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n📝 ${message}`,
+      { reply_markup: keyboard }
+    );
+    
+    res.json({
+      success: true,
+      message: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('Ошибка отправки сообщения:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/history/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 ORDER BY created_at ASC',
+      [dialogId]
+    );
+    
+    await pool.query(
+      'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
+      [dialogId, 'admin']
+    );
+    
+    res.json({
+      success: true,
+      messages: messages.rows,
+      dialog_id: dialogId
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения истории:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/new/:userId/:lastId', async (req, res) => {
+  try {
+    const { userId, lastId } = req.params;
+    const lastMessageId = parseInt(lastId) || 0;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 AND id > $2 ORDER BY created_at ASC',
+      [dialogId, lastMessageId]
+    );
+    
+    if (messages.rows.length > 0) {
+      await pool.query(
+        'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
+        [dialogId, 'admin', lastMessageId]
+      );
+    }
+    
+    res.json({
+      success: true,
+      messages: messages.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки новых сообщений:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+adminBot.on('callback_query', async (callbackQuery) => {
+  const msg = callbackQuery.message;
+  const data = callbackQuery.data;
+  
+  if (!isAdmin(callbackQuery)) {
+    await adminBot.answerCallbackQuery(callbackQuery.id, { 
+      text: '⛔ Доступ запрещен',
+      show_alert: true 
+    });
+    return;
+  }
+  
+  const [action, value] = data.split(':');
+  
+  if (action === 'support_reply') {
+    const dialogId = parseInt(value);
+    
+    userStates[msg.chat.id] = {
+      action: 'support_reply',
+      dialog_id: dialogId
+    };
+    
+    await adminBot.sendMessage(
+      msg.chat.id,
+      `✉️ Введите ответ для диалога #${dialogId}:`
+    );
+    
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+  }
+  
+  else if (action === 'support_close') {
+    const dialogId = parseInt(value);
+    
+    await pool.query(
+      'UPDATE support_dialogs SET status = $1 WHERE id = $2',
+      ['closed', dialogId]
+    );
+    
+    await adminBot.editMessageText(
+      `✅ Диалог #${dialogId} закрыт`,
+      {
+        chat_id: msg.chat.id,
+        message_id: msg.message_id
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+  }
+});
+
+adminBot.onText(/\/reply_(\d+)/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const dialogId = parseInt(match[1]);
+  
+  userStates[msg.chat.id] = {
+    action: 'support_reply',
+    dialog_id: dialogId
+  };
+  
+  adminBot.sendMessage(
+    msg.chat.id,
+    `✉️ Введите ответ для диалога #${dialogId}:`
+  );
+});
+
+adminBot.onText(/\/dialogs/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const dialogs = await pool.query(`
+      SELECT d.*, u.username, 
+             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.status = 'active'
+      ORDER BY d.updated_at DESC
+    `);
+    
+    if (dialogs.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '📭 Нет активных диалогов');
+      return;
+    }
+    
+    let text = '💬 Активные диалоги:\n\n';
+    
+    for (const d of dialogs.rows) {
+      text += `#${d.id} | 👤 ${d.username}\n`;
+      text += `📅 ${new Date(d.updated_at).toLocaleString('ru-RU')}\n`;
+      if (d.unread > 0) text += `✉️ Новых: ${d.unread}\n`;
+      text += `🔹 /reply_${d.id} - ответить\n`;
+      text += `🔹 /close_${d.id} - закрыть\n\n`;
+    }
+    
+    adminBot.sendMessage(msg.chat.id, text);
+    
+  } catch (error) {
+    console.error('Ошибка получения диалогов:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка получения диалогов');
+  }
+});
+
+adminBot.onText(/\/close_(\d+)/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const dialogId = parseInt(match[1]);
+  
+  try {
+    await pool.query(
+      'UPDATE support_dialogs SET status = $1 WHERE id = $2',
+      ['closed', dialogId]
+    );
+    
+    adminBot.sendMessage(msg.chat.id, `✅ Диалог #${dialogId} закрыт`);
+    
+  } catch (error) {
+    console.error('Ошибка закрытия диалога:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка закрытия диалога');
+  }
 });
 
 async function sendNewOrderNotification(orderId, total, email) {
