@@ -1362,23 +1362,123 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
+// ЕДИНСТВЕННЫЙ обработчик сообщений для админа
 adminBot.on('message', async (msg) => {
-  if (!isAdmin(msg) || !msg.text || msg.text.startsWith('/')) return;
+  if (!isAdmin(msg) || !msg.text) return;
   
   const chatId = msg.chat.id;
   const text = msg.text.trim();
+  
+  // Пропускаем команды (начинаются с /)
+  if (text.startsWith('/')) return;
+  
+  // Проверяем состояние пользователя
   const userState = userStates[chatId];
   
-  if (userState && userState.step) {
-    if (userState.action === 'edit_price') {
-      await handleEditPriceStep(msg, userState);
-    } else if (userState.action === 'process_refund') {
-      await handleRefundStep(msg, userState);
-    } else if (userState.action === 'support_reply') {
-      await handleSupportReply(msg, userState);
-    } else {
-      await handleAddProductStep(msg, userState);
+  if (!userState) return;
+  
+  console.log('📨 Получено сообщение от админа в состоянии:', userState);
+  
+  // Обработка ответа в диалог поддержки
+  if (userState.action === 'support_reply') {
+    const dialogId = userState.dialog_id;
+    
+    // Сразу очищаем состояние, чтобы можно было отвечать в другие диалоги
+    delete userStates[chatId];
+    
+    if (!text) {
+      adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
+      return;
     }
+    
+    try {
+      // Проверяем, активен ли диалог
+      const dialogInfo = await pool.query(
+        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+        [dialogId, 'active']
+      );
+      
+      if (dialogInfo.rows.length === 0) {
+        adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+        return;
+      }
+      
+      const userId = dialogInfo.rows[0].user_id;
+      
+      // Сохраняем ответ в БД
+      const result = await pool.query(
+        `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [dialogId, userId, 'admin', text]
+      );
+      
+      // Обновляем время диалога
+      await pool.query(
+        'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [dialogId]
+      );
+      
+      // Получаем информацию о пользователе для уведомления
+      const userResult = await pool.query(
+        'SELECT tg_id, username FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      // Отправляем уведомление пользователю в Telegram
+      if (userResult.rows.length > 0 && userResult.rows[0].tg_id) {
+        try {
+          await userBot.sendMessage(
+            userResult.rows[0].tg_id,
+            `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${text}\n\n[Ответить можно на сайте](${SITE_URL}/support.html)`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch (notifyError) {
+          console.error('Ошибка отправки уведомления пользователю:', notifyError);
+        }
+      }
+      
+      // Подтверждаем админу
+      adminBot.sendMessage(
+        chatId, 
+        `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
+      );
+      
+      // Обновляем сообщение с кнопками (опционально)
+      try {
+        const dialogMessages = await pool.query(
+          'SELECT COUNT(*) as count FROM support_messages WHERE dialog_id = $1',
+          [dialogId]
+        );
+        
+        await adminBot.sendMessage(
+          chatId,
+          `💬 Диалог #${dialogId} обновлен. Всего сообщений: ${dialogMessages.rows[0].count}`
+        );
+      } catch (e) {}
+      
+    } catch (error) {
+      console.error('❌ Ошибка отправки ответа в поддержку:', error);
+      adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа. Попробуйте еще раз.');
+    }
+    return;
+  }
+  
+  // Обработка изменения цены
+  else if (userState.action === 'edit_price') {
+    await handleEditPriceStep(msg, userState);
+    return;
+  }
+  
+  // Обработка возврата
+  else if (userState.action === 'process_refund') {
+    await handleRefundStep(msg, userState);
+    return;
+  }
+  
+  // Обработка добавления товара
+  else if (userState.step) {
+    await handleAddProductStep(msg, userState);
+    return;
   }
 });
 
