@@ -1374,136 +1374,71 @@ adminBot.on('message', async (msg) => {
       await handleEditPriceStep(msg, userState);
     } else if (userState.action === 'process_refund') {
       await handleRefundStep(msg, userState);
+    } else if (userState.action === 'support_reply') {
+      await handleSupportReply(msg, userState);
     } else {
       await handleAddProductStep(msg, userState);
     }
   }
 });
 
-// Обработка ответов в диалогах
-adminBot.on('message', async (msg) => {
-  if (!isAdmin(msg.from.id)) return;
-  if (!msg.text || msg.text.startsWith('/')) return;
-  
+async function handleSupportReply(msg, userState) {
   const chatId = msg.chat.id;
-  const userState = userStates[chatId];
+  const dialogId = userState.dialog_id;
+  const replyText = msg.text.trim();
   
-  // Если админ отвечает на сообщение из диалога
-  if (userState && userState.action === 'support_reply') {
-    const dialogId = userState.dialog_id;
-    const replyText = msg.text.trim();
-    
-    if (!replyText) {
-      adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
-      return;
-    }
-    
-    try {
-      // Получаем информацию о диалоге
-      const dialogInfo = await pool.query(
-        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-        [dialogId, 'active']
-      );
-      
-      if (dialogInfo.rows.length === 0) {
-        adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
-        delete userStates[chatId];
-        return;
-      }
-      
-      const userId = dialogInfo.rows[0].user_id;
-      
-      // Сохраняем ответ в БД
-      const result = await pool.query(
-        `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [dialogId, userId, 'admin', replyText]
-      );
-      
-      // Обновляем время диалога
-      await pool.query(
-        'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-        [dialogId]
-      );
-      
-      // Отправляем уведомление пользователю в Telegram
-      const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
-      
-      if (userResult.rows.length > 0) {
-        try {
-          await userBot.sendMessage(
-            userResult.rows[0].tg_id,
-            `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${replyText}\n\nОтветить можно в чате на сайте.`
-          );
-        } catch (e) {
-          console.error('Ошибка отправки уведомления:', e);
-        }
-      }
-      
-      adminBot.sendMessage(
-        chatId, 
-        `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${replyText}`
-      );
-      
-    } catch (error) {
-      console.error('Ошибка отправки ответа:', error);
-      adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа');
-    }
-    
-    // Очищаем состояние
-    delete userStates[chatId];
+  if (!replyText) {
+    adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
     return;
   }
-});
-
-
-adminBot.onText(/\/dialogs/, async (msg) => {
-  if (!isAdmin(msg.from.id)) return;
   
   try {
-    const dialogs = await pool.query(`
-      SELECT d.*, u.username, 
-             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread,
-             (SELECT message FROM support_messages WHERE dialog_id = d.id ORDER BY created_at DESC LIMIT 1) as last_message
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.status = 'active'
-      ORDER BY d.updated_at DESC
-    `);
+    const dialogInfo = await pool.query(
+      'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+      [dialogId, 'active']
+    );
     
-    if (dialogs.rows.length === 0) {
-      adminBot.sendMessage(msg.chat.id, '📭 Нет активных диалогов');
+    if (dialogInfo.rows.length === 0) {
+      adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+      delete userStates[chatId];
       return;
     }
     
-    let text = '💬 Активные диалоги:\n\n';
+    const userId = dialogInfo.rows[0].user_id;
     
-    for (const d of dialogs.rows) {
-      const lastMsg = d.last_message ? d.last_message.substring(0, 50) + (d.last_message.length > 50 ? '...' : '') : 'нет сообщений';
-      const unreadMark = d.unread > 0 ? '❗' : '';
-      
-      text += `${unreadMark} #${d.id} | 👤 ${d.username}\n`;
-      text += `📅 ${new Date(d.updated_at).toLocaleString('ru-RU')}\n`;
-      text += `💬 ${d.unread} новых · ${lastMsg}\n`;
-      text += `🔹 /reply_${d.id} - ответить\n`;
-      text += `🔹 /close_${d.id} - закрыть\n\n`;
-    }
+    await pool.query(
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
+       VALUES ($1, $2, $3, $4)`,
+      [dialogId, userId, 'admin', replyText]
+    );
     
-    // Отправляем частями если длинное
-    if (text.length > 4000) {
-      const chunks = text.match(/.{1,4000}/g);
-      for (const chunk of chunks) {
-        await adminBot.sendMessage(msg.chat.id, chunk);
+    await pool.query(
+      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [dialogId]
+    );
+    
+    const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
+    
+    if (userResult.rows.length > 0) {
+      try {
+        await userBot.sendMessage(
+          userResult.rows[0].tg_id,
+          `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${replyText}\n\nОтветить можно в чате на сайте.`
+        );
+      } catch (e) {
+        console.error('Ошибка отправки уведомления:', e);
       }
-    } else {
-      await adminBot.sendMessage(msg.chat.id, text);
     }
+    
+    adminBot.sendMessage(chatId, `✅ Ответ отправлен в диалог #${dialogId}`);
     
   } catch (error) {
-    console.error('Ошибка получения диалогов:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка получения диалогов');
+    console.error('Ошибка отправки ответа:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа');
   }
-});
+  
+  delete userStates[chatId];
+}
 
 async function handleEditPriceStep(msg, userState) {
   const chatId = msg.chat.id;
@@ -1615,190 +1550,235 @@ adminBot.on('callback_query', async (callbackQuery) => {
     });
     return;
   }
-
-  adminBot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
   
-  if (!isAdmin(callbackQuery.from.id)) {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '⛔ Доступ запрещен',
-      show_alert: true 
-    });
-    return;
-  }
-
-  const [action, value] = data.split(':');
-  
-  // Обработка поддержки
-  if (action === 'support_reply') {
-    const dialogId = parseInt(value);
-    
-    // Сохраняем состояние для ответа
-    userStates[msg.chat.id] = {
-      action: 'support_reply',
-      dialog_id: dialogId
-    };
-    
-    await adminBot.sendMessage(
-      msg.chat.id,
-      `✉️ Введите ответ для диалога #${dialogId}:`
-    );
-    
+  if (data.startsWith('order_detail:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const page = parts[2] || 1;
+    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
     await adminBot.answerCallbackQuery(callbackQuery.id);
     return;
   }
   
-  else if (action === 'support_close') {
-    const dialogId = parseInt(value);
-    
-    try {
-      // Закрываем диалог
-      await pool.query(
-        'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-        ['closed', dialogId]
-      );
-      
-      // Отправляем уведомление пользователю
-      const dialogInfo = await pool.query(
-        'SELECT user_id FROM support_dialogs WHERE id = $1',
-        [dialogId]
-      );
-      
-      if (dialogInfo.rows.length > 0) {
-        const userId = dialogInfo.rows[0].user_id;
-        const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
-        
-        if (userResult.rows.length > 0) {
-          try {
-            await userBot.sendMessage(
-              userResult.rows[0].tg_id,
-              `✅ Диалог #${dialogId} был закрыт администратором.\nСпасибо за обращение!`
-            );
-          } catch (e) {
-            console.error('Ошибка уведомления пользователя:', e);
-          }
-        }
-      }
-      
-      // Обновляем сообщение
-      await adminBot.editMessageText(
-        `✅ Диалог #${dialogId} успешно закрыт`,
-        {
+  if (data.startsWith('orders_page:')) {
+    const page = data.split(':')[1];
+    await handleOrdersPage(msg, page, callbackQuery.id);
+    return;
+  }
+  
+  const [action, ...params] = data.split(':');
+  
+  switch(action) {
+    case 'request_code':
+      await handleRequestCode(params[0], msg, callbackQuery.id);
+      break;
+    case 'order_ready':
+      await handleOrderReady(params[0], msg, callbackQuery.id);
+      break;
+    case 'wrong_code':
+      await handleWrongCode(params[0], msg, callbackQuery.id);
+      break;
+    case 'mark_completed':
+      await handleMarkCompleted(params[0], msg, callbackQuery.id);
+      break;
+    case 'back_to_orders':
+      await handleBackToOrders(msg, params[0]);
+      await adminBot.answerCallbackQuery(callbackQuery.id);
+      break;
+    case 'force_complete':
+      await completeOrder(params[0], msg, callbackQuery.id);
+      break;
+    case 'cancel_order':
+      await handleCancelOrder(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'confirm_cancel_order':
+      await handleConfirmCancelOrder(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'process_refund':
+      await handleProcessRefund(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'confirm_refund':
+      await handleConfirmRefund(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'cancel_refund':
+      await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'confirm_cancel_refund':
+      await handleConfirmCancelRefund(params[0], msg, callbackQuery.id, params[1]);
+      break;
+    case 'add_product_prompt':
+      await adminBot.answerCallbackQuery(callbackQuery.id);
+      adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
+      break;
+    case 'edit_price_list':
+      await handleEditPriceList(msg, callbackQuery.id);
+      break;
+    case 'edit_price':
+      await handleEditPrice(params[0], msg, callbackQuery.id);
+      break;
+    case 'delete_product_list':
+      await handleDeleteProductList(msg, callbackQuery.id);
+      break;
+    case 'delete_product':
+      await handleDeleteProduct(params[0], msg, callbackQuery.id);
+      break;
+    case 'set_gift':
+      await handleSetGift(params[0], msg, callbackQuery.id);
+      break;
+    case 'cancel_add_product':
+      await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
+      await adminBot.editMessageText('❌ Добавление товара отменено.', {
+        chat_id: msg.chat.id,
+        message_id: msg.message_id
+      });
+      break;
+    case 'support_reply':
+      const dialogId = parseInt(params[0]);
+      userStates[msg.chat.id] = {
+        action: 'support_reply',
+        dialog_id: dialogId
+      };
+      await adminBot.sendMessage(msg.chat.id, `✉️ Введите ответ для диалога #${dialogId}:`);
+      await adminBot.answerCallbackQuery(callbackQuery.id);
+      break;
+    case 'support_close':
+      const closeDialogId = parseInt(params[0]);
+      try {
+        await pool.query(
+          'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+          ['closed', closeDialogId]
+        );
+        await adminBot.editMessageText(`✅ Диалог #${closeDialogId} закрыт`, {
           chat_id: msg.chat.id,
           message_id: msg.message_id
-        }
-      );
-      
+        });
+        await adminBot.answerCallbackQuery(callbackQuery.id);
+      } catch (error) {
+        console.error('Ошибка закрытия диалога:', error);
+        await adminBot.answerCallbackQuery(callbackQuery.id, { 
+          text: '❌ Ошибка',
+          show_alert: true 
+        });
+      }
+      break;
+    default:
       await adminBot.answerCallbackQuery(callbackQuery.id, { 
-        text: '✅ Диалог закрыт',
-        show_alert: false
-      });
-      
-    } catch (error) {
-      console.error('Ошибка закрытия диалога:', error);
-      await adminBot.answerCallbackQuery(callbackQuery.id, { 
-        text: '❌ Ошибка закрытия диалога',
+        text: '⚠️ Неизвестная команда',
         show_alert: true 
       });
-    }
+  }
+});
+
+adminBot.onText(/\/reply_(\d+)(?:\s+(.+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const dialogId = parseInt(match[1]);
+  const replyText = match[2];
+  
+  if (!replyText) {
+    userStates[msg.chat.id] = {
+      action: 'support_reply',
+      dialog_id: dialogId
+    };
+    adminBot.sendMessage(msg.chat.id, `✉️ Введите ответ для диалога #${dialogId}:`);
     return;
   }
   
   try {
-    if (data.startsWith('order_detail:')) {
-      const parts = data.split(':');
-      const orderId = parts[1];
-      const page = parts[2] || 1;
-      await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
-      await adminBot.answerCallbackQuery(callbackQuery.id);
+    const dialogInfo = await pool.query(
+      'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+      [dialogId, 'active']
+    );
+    
+    if (dialogInfo.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '❌ Диалог не найден или уже закрыт');
       return;
     }
     
-    if (data.startsWith('orders_page:')) {
-      const page = data.split(':')[1];
-      await handleOrdersPage(msg, page, callbackQuery.id);
-      return;
+    const userId = dialogInfo.rows[0].user_id;
+    
+    await pool.query(
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
+       VALUES ($1, $2, $3, $4)`,
+      [dialogId, userId, 'admin', replyText]
+    );
+    
+    await pool.query(
+      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [dialogId]
+    );
+    
+    const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
+    
+    if (userResult.rows.length > 0) {
+      try {
+        await userBot.sendMessage(
+          userResult.rows[0].tg_id,
+          `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${replyText}\n\nОтветить можно в чате на сайте.`
+        );
+      } catch (e) {}
     }
     
-    const [action, ...params] = data.split(':');
+    adminBot.sendMessage(msg.chat.id, `✅ Ответ отправлен в диалог #${dialogId}`);
     
-    switch(action) {
-      case 'request_code':
-        await handleRequestCode(params[0], msg, callbackQuery.id);
-        break;
-      case 'order_ready':
-        await handleOrderReady(params[0], msg, callbackQuery.id);
-        break;
-      case 'wrong_code':
-        await handleWrongCode(params[0], msg, callbackQuery.id);
-        break;
-      case 'mark_completed':
-        await handleMarkCompleted(params[0], msg, callbackQuery.id);
-        break;
-      case 'back_to_orders':
-        await handleBackToOrders(msg, params[0]);
-        await adminBot.answerCallbackQuery(callbackQuery.id);
-        break;
-      case 'force_complete':
-        await completeOrder(params[0], msg, callbackQuery.id);
-        break;
-      case 'cancel_order':
-        await handleCancelOrder(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'confirm_cancel_order':
-        await handleConfirmCancelOrder(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'process_refund':
-        await handleProcessRefund(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'confirm_refund':
-        await handleConfirmRefund(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'cancel_refund':
-        await handleCancelRefund(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'confirm_cancel_refund':
-        await handleConfirmCancelRefund(params[0], msg, callbackQuery.id, params[1]);
-        break;
-      case 'add_product_prompt':
-        await adminBot.answerCallbackQuery(callbackQuery.id);
-        adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
-        break;
-      case 'edit_price_list':
-        await handleEditPriceList(msg, callbackQuery.id);
-        break;
-      case 'edit_price':
-        await handleEditPrice(params[0], msg, callbackQuery.id);
-        break;
-      case 'delete_product_list':
-        await handleDeleteProductList(msg, callbackQuery.id);
-        break;
-      case 'delete_product':
-        await handleDeleteProduct(params[0], msg, callbackQuery.id);
-        break;
-      case 'set_gift':
-        await handleSetGift(params[0], msg, callbackQuery.id);
-        break;
-      case 'cancel_add_product':
-        await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
-        await adminBot.editMessageText('❌ Добавление товара отменено.', {
-          chat_id: msg.chat.id,
-          message_id: msg.message_id
-        });
-        break;
-      default:
-        await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '⚠️ Неизвестная команда',
-          show_alert: true 
-        });
-    }
   } catch (error) {
-    console.error('❌ Ошибка обработки callback:', error);
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '❌ Ошибка обработки запроса',
-      show_alert: true 
-    });
+    console.error('Ошибка:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при отправке ответа');
+  }
+});
+
+adminBot.onText(/\/dialogs/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const dialogs = await pool.query(`
+      SELECT d.*, u.username, 
+             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.status = 'active'
+      ORDER BY d.updated_at DESC
+    `);
+    
+    if (dialogs.rows.length === 0) {
+      adminBot.sendMessage(msg.chat.id, '📭 Нет активных диалогов');
+      return;
+    }
+    
+    let text = '💬 Активные диалоги:\n\n';
+    
+    for (const d of dialogs.rows) {
+      text += `#${d.id} | 👤 ${d.username}\n`;
+      text += `📅 ${new Date(d.updated_at).toLocaleString('ru-RU')}\n`;
+      if (d.unread > 0) text += `✉️ Новых: ${d.unread}\n`;
+      text += `🔹 /reply_${d.id} - ответить\n`;
+      text += `🔹 /close_${d.id} - закрыть\n\n`;
+    }
+    
+    adminBot.sendMessage(msg.chat.id, text);
+    
+  } catch (error) {
+    console.error('Ошибка получения диалогов:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка получения диалогов');
+  }
+});
+
+adminBot.onText(/\/close_(\d+)/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const dialogId = parseInt(match[1]);
+  
+  try {
+    await pool.query(
+      'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['closed', dialogId]
+    );
+    
+    adminBot.sendMessage(msg.chat.id, `✅ Диалог #${dialogId} закрыт`);
+    
+  } catch (error) {
+    console.error('Ошибка закрытия диалога:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка закрытия диалога');
   }
 });
 
@@ -4102,127 +4082,6 @@ app.get('/api/support/new/:userId/:lastId', async (req, res) => {
   } catch (error) {
     console.error('Ошибка проверки новых сообщений:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-adminBot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
-  
-  if (!isAdmin(callbackQuery)) {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '⛔ Доступ запрещен',
-      show_alert: true 
-    });
-    return;
-  }
-  
-  const [action, value] = data.split(':');
-  
-  if (action === 'support_reply') {
-    const dialogId = parseInt(value);
-    
-    userStates[msg.chat.id] = {
-      action: 'support_reply',
-      dialog_id: dialogId
-    };
-    
-    await adminBot.sendMessage(
-      msg.chat.id,
-      `✉️ Введите ответ для диалога #${dialogId}:`
-    );
-    
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-  }
-  
-  else if (action === 'support_close') {
-    const dialogId = parseInt(value);
-    
-    await pool.query(
-      'UPDATE support_dialogs SET status = $1 WHERE id = $2',
-      ['closed', dialogId]
-    );
-    
-    await adminBot.editMessageText(
-      `✅ Диалог #${dialogId} закрыт`,
-      {
-        chat_id: msg.chat.id,
-        message_id: msg.message_id
-      }
-    );
-    
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-  }
-});
-
-adminBot.onText(/\/reply_(\d+)/, async (msg, match) => {
-  if (!isAdmin(msg)) return;
-  
-  const dialogId = parseInt(match[1]);
-  
-  userStates[msg.chat.id] = {
-    action: 'support_reply',
-    dialog_id: dialogId
-  };
-  
-  adminBot.sendMessage(
-    msg.chat.id,
-    `✉️ Введите ответ для диалога #${dialogId}:`
-  );
-});
-
-adminBot.onText(/\/dialogs/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  
-  try {
-    const dialogs = await pool.query(`
-      SELECT d.*, u.username, 
-             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.status = 'active'
-      ORDER BY d.updated_at DESC
-    `);
-    
-    if (dialogs.rows.length === 0) {
-      adminBot.sendMessage(msg.chat.id, '📭 Нет активных диалогов');
-      return;
-    }
-    
-    let text = '💬 Активные диалоги:\n\n';
-    
-    for (const d of dialogs.rows) {
-      text += `#${d.id} | 👤 ${d.username}\n`;
-      text += `📅 ${new Date(d.updated_at).toLocaleString('ru-RU')}\n`;
-      if (d.unread > 0) text += `✉️ Новых: ${d.unread}\n`;
-      text += `🔹 /reply_${d.id} - ответить\n`;
-      text += `🔹 /close_${d.id} - закрыть\n\n`;
-    }
-    
-    adminBot.sendMessage(msg.chat.id, text);
-    
-  } catch (error) {
-    console.error('Ошибка получения диалогов:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка получения диалогов');
-  }
-});
-
-adminBot.onText(/\/close_(\d+)/, async (msg, match) => {
-  if (!isAdmin(msg)) return;
-  
-  const dialogId = parseInt(match[1]);
-  
-  try {
-    await pool.query(
-      'UPDATE support_dialogs SET status = $1 WHERE id = $2',
-      ['closed', dialogId]
-    );
-    
-    adminBot.sendMessage(msg.chat.id, `✅ Диалог #${dialogId} закрыт`);
-    
-  } catch (error) {
-    console.error('Ошибка закрытия диалога:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка закрытия диалога');
   }
 });
 
