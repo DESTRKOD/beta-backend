@@ -265,6 +265,15 @@ async function initDB() {
     `);
 
     try {
+  await pool.query(`
+    ALTER TABLE support_messages 
+    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb
+  `);
+} catch (e) {
+  console.log('Колонка metadata уже существует или ошибка:', e.message);
+}
+
+    try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_user_id ON support_dialogs(user_id)');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_status ON support_dialogs(status)');
       await pool.query('CREATE INDEX IF NOT EXISTS idx_support_messages_dialog_id ON support_messages(dialog_id)');
@@ -4649,6 +4658,192 @@ async function sendNewOrderNotification(orderId, total, email) {
     console.error('Ошибка отправки уведомления:', error);
   }
 }
+
+app.post('/api/support/message', async (req, res) => {
+  try {
+    let user_id, message, dialog_id;
+    let fileData = null;
+
+    if (req.is('multipart/form-data')) {
+      user_id = req.body.user_id;
+      dialog_id = req.body.dialog_id;
+      message = req.body.message || '';
+      
+      if (req.files && req.files.file) {
+        const file = req.files.file;
+        const fileUrl = await uploadFile(file);
+        fileData = {
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          url: fileUrl
+        };
+      }
+    } else {
+      user_id = req.body.user_id;
+      message = req.body.message;
+      dialog_id = req.body.dialog_id;
+    }
+
+    if (!user_id || (!message && !fileData)) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    let dialogId = dialog_id;
+
+    if (!dialogId) {
+      const existingDialog = await pool.query(
+        'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+        [user_id, 'active']
+      );
+      
+      if (existingDialog.rows.length > 0) {
+        dialogId = existingDialog.rows[0].id;
+      } else {
+        const newDialog = await pool.query(
+          'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
+          [user_id, 'active']
+        );
+        dialogId = newDialog.rows[0].id;
+      }
+    }
+
+    let finalMessage = message;
+    let metadata = {};
+
+    if (fileData) {
+      metadata.file = fileData;
+      finalMessage = finalMessage || `[Файл: ${fileData.name}]`;
+    }
+
+    const result = await pool.query(
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message, metadata) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [dialogId, user_id, 'user', finalMessage, metadata]
+    );
+
+    await pool.query(
+      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [dialogId]
+    );
+
+    const userResult = await pool.query(
+      'SELECT username FROM users WHERE id = $1',
+      [user_id]
+    );
+
+    const username = userResult.rows[0]?.username || `ID ${user_id}`;
+
+    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
+    
+    if (message) {
+      adminMessage += `📝 ${message}\n`;
+    }
+    
+    if (fileData) {
+      adminMessage += `📎 Файл: ${fileData.name} (${(fileData.size / 1024).toFixed(1)} KB)\n${fileData.url}`;
+    }
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
+        ]
+      ]
+    };
+
+    await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+
+    res.json({
+      success: true,
+      message: result.rows[0],
+      dialog_id: dialogId
+    });
+
+  } catch (error) {
+    console.error('Ошибка отправки сообщения:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/history/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 ORDER BY created_at ASC',
+      [dialogId]
+    );
+    
+    await pool.query(
+      'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
+      [dialogId, 'admin']
+    );
+    
+    res.json({
+      success: true,
+      messages: messages.rows,
+      dialog_id: dialogId
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения истории:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/new/:userId/:lastId', async (req, res) => {
+  try {
+    const { userId, lastId } = req.params;
+    const lastMessageId = parseInt(lastId) || 0;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 AND id > $2 ORDER BY created_at ASC',
+      [dialogId, lastMessageId]
+    );
+    
+    if (messages.rows.length > 0) {
+      await pool.query(
+        'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
+        [dialogId, 'admin', lastMessageId]
+      );
+    }
+    
+    res.json({
+      success: true,
+      messages: messages.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки новых сообщений:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
 
 async function loadSampleProducts() {
   try {
