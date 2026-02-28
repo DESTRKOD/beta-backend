@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const axios = require('axios');
+const sharp = require('sharp');
 const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 const cors = require('cors');
@@ -3512,15 +3513,55 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
       dialog_id = req.body.dialog_id;
       message = req.body.message || '';
       
-      const base64File = req.file.buffer.toString('base64');
       const mimeType = req.file.mimetype;
-      const dataUrl = `data:${mimeType};base64,${base64File}`;
+      const isImage = mimeType.startsWith('image/');
+      
+      let fileBuffer = req.file.buffer;
+      let finalMimeType = mimeType;
+      
+      // Если это изображение, оптимизируем его
+      if (isImage) {
+        try {
+          // Оптимизируем изображение: уменьшаем размер, конвертируем в JPEG
+          fileBuffer = await sharp(req.file.buffer)
+            .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 80, progressive: true })
+            .toBuffer();
+          finalMimeType = 'image/jpeg';
+        } catch (sharpError) {
+          console.error('Ошибка оптимизации изображения:', sharpError);
+          // Если ошибка, используем оригинал
+          fileBuffer = req.file.buffer;
+        }
+      }
+      
+      // Конвертируем в base64
+      const base64File = fileBuffer.toString('base64');
+      const dataUrl = `data:${finalMimeType};base64,${base64File}`;
+      
+      // Для изображений создаём preview
+      let preview = null;
+      if (isImage) {
+        try {
+          const previewBuffer = await sharp(req.file.buffer)
+            .resize(200, 200, { fit: 'cover' })
+            .jpeg({ quality: 70 })
+            .toBuffer();
+          const previewBase64 = previewBuffer.toString('base64');
+          preview = `data:image/jpeg;base64,${previewBase64}`;
+        } catch (previewError) {
+          console.error('Ошибка создания preview:', previewError);
+        }
+      }
       
       fileData = {
         name: req.file.originalname,
-        size: req.file.size,
-        type: req.file.mimetype,
-        url: dataUrl
+        size: fileBuffer.length,
+        type: finalMimeType,
+        url: dataUrl,
+        isImage: isImage,
+        preview: preview,
+        thumbnail: preview // для совместимости
       };
     } else {
       user_id = req.body.user_id;
@@ -3556,7 +3597,7 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
 
     if (fileData) {
       metadata.file = fileData;
-      finalMessage = finalMessage || `[Файл: ${fileData.name}]`;
+      finalMessage = finalMessage || (fileData.isImage ? '[Изображение]' : `[Файл: ${fileData.name}]`);
     }
 
     const result = await pool.query(
@@ -3577,6 +3618,7 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
 
     const username = userResult.rows[0]?.username || `ID ${user_id}`;
 
+    // Формируем сообщение для админа
     let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
     
     if (message) {
@@ -3585,14 +3627,18 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     
     if (fileData) {
       const fileSize = (fileData.size / 1024).toFixed(1);
-      adminMessage += `📎 Файл: ${fileData.name} (${fileSize} KB)\n`;
+      if (fileData.isImage) {
+        adminMessage += `🖼️ Изображение: ${fileData.name} (${fileSize} KB)`;
+      } else {
+        adminMessage += `📎 Файл: ${fileData.name} (${fileSize} KB)`;
+      }
     }
 
     const keyboard = {
       inline_keyboard: [
         [
-          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
-          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
+          { text: '📤 Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '🔐 Закрыть', callback_data: `support_close:${dialogId}` }
         ]
       ]
     };
@@ -3635,6 +3681,23 @@ app.get('/api/support/history/:userId', async (req, res) => {
       [dialogId]
     );
     
+    // Добавляем флаг isImage для удобства на клиенте
+    const messagesWithFlags = messages.rows.map(msg => {
+      if (msg.metadata && msg.metadata.file) {
+        return {
+          ...msg,
+          metadata: {
+            ...msg.metadata,
+            file: {
+              ...msg.metadata.file,
+              isImage: msg.metadata.file.type?.startsWith('image/') || false
+            }
+          }
+        };
+      }
+      return msg;
+    });
+    
     await pool.query(
       'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
       [dialogId, 'admin']
@@ -3642,7 +3705,7 @@ app.get('/api/support/history/:userId', async (req, res) => {
     
     res.json({
       success: true,
-      messages: messages.rows,
+      messages: messagesWithFlags,
       dialog_id: dialogId
     });
     
@@ -3673,6 +3736,23 @@ app.get('/api/support/new/:userId/:lastId', async (req, res) => {
       [dialogId, lastMessageId]
     );
     
+    // Добавляем флаг isImage
+    const messagesWithFlags = messages.rows.map(msg => {
+      if (msg.metadata && msg.metadata.file) {
+        return {
+          ...msg,
+          metadata: {
+            ...msg.metadata,
+            file: {
+              ...msg.metadata.file,
+              isImage: msg.metadata.file.type?.startsWith('image/') || false
+            }
+          }
+        };
+      }
+      return msg;
+    });
+    
     if (messages.rows.length > 0) {
       await pool.query(
         'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
@@ -3682,7 +3762,7 @@ app.get('/api/support/new/:userId/:lastId', async (req, res) => {
     
     res.json({
       success: true,
-      messages: messages.rows
+      messages: messagesWithFlags
     });
     
   } catch (error) {
