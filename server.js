@@ -3625,37 +3625,43 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     );
     const username = userResult.rows[0]?.username || `ID ${user_id}`;
 
-    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
+   // Уведомление админу
+let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
 
-    if (message) {
-      adminMessage += `📝 ${message}\n`;
-    }
+if (message) {
+  adminMessage += `📝 ${message}\n`;
+}
 
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '📤 Ответить', callback_data: `support_reply:${dialogId}` },
-          { text: '🔐 Закрыть', callback_data: `support_close:${dialogId}` }
-        ]
-      ]
-    };
+const keyboard = {
+  inline_keyboard: [
+    [
+      { text: '📤 Ответить', callback_data: `support_reply:${dialogId}` },
+      { text: '🔐 Закрыть', callback_data: `support_close:${dialogId}` }
+    ]
+  ]
+};
 
-   try {
-  if (fileData && fileData.isImage) {
-    // Отправляем как буфер файла, а не как base64-URL
-    await adminBot.sendPhoto(ADMIN_ID, {
-      source: req.file.buffer,           // ← берём оригинальный буфер из multer
-      filename: req.file.originalname
-    }, {
+try {
+  if (fileData && fileData.isImage && req.file && req.file.buffer) {
+    await adminBot.sendPhoto(ADMIN_ID, req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype || 'image/jpeg',
       caption: adminMessage,
-      reply_markup: keyboard
+      reply_markup: keyboard,
+      parse_mode: 'Markdown'
     });
   } else {
-    await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+    await adminBot.sendMessage(ADMIN_ID, adminMessage, {
+      reply_markup: keyboard,
+      parse_mode: 'Markdown'
+    });
   }
 } catch (botError) {
   console.error('Ошибка отправки в админ-бот:', botError);
-  await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось отправить фото)', { reply_markup: keyboard });
+  await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось прикрепить фото)', {
+    reply_markup: keyboard,
+    parse_mode: 'Markdown'
+  });
 }
 
     res.json({
