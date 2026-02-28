@@ -5,6 +5,7 @@ const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 const cors = require('cors');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,8 +20,15 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
+// Настройка multer для загрузки файлов
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
+
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -259,19 +267,11 @@ async function initDB() {
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         sender VARCHAR(10) NOT NULL CHECK (sender IN ('user', 'admin')),
         message TEXT NOT NULL,
+        metadata JSONB DEFAULT '{}'::jsonb,
         read BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    try {
-  await pool.query(`
-    ALTER TABLE support_messages 
-    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb
-  `);
-} catch (e) {
-  console.log('Колонка metadata уже существует или ошибка:', e.message);
-}
 
     try {
       await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_user_id ON support_dialogs(user_id)');
@@ -362,15 +362,10 @@ function pingSelf() {
       timeout: 8000
     };
     
-    const req = https.request(options, (res) => {
-    });
-    
-    req.on('error', (err) => {
-    });
-    
+    const req = https.request(options, (res) => {});
+    req.on('error', (err) => {});
     req.end();
-  } catch (error) {
-  }
+  } catch (error) {}
 }
 
 function startKeepAlive() {
@@ -428,8 +423,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                 photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
               }
             }
-          } catch (photoError) {
-          }
+          } catch (photoError) {}
           
           const result = await pool.query(
             `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username) 
@@ -490,8 +484,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               `📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
             
             await adminBot.sendMessage(ADMIN_ID, adminText);
-          } catch (adminError) {
-          }
+          } catch (adminError) {}
           
           return;
         }
@@ -524,8 +517,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                   );
                 }
               }
-            } catch (photoError) {
-            }
+            } catch (photoError) {}
             
             await pool.query(
               `UPDATE users SET 
@@ -627,8 +619,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         `3. Если проблема persists, свяжитесь с поддержкой\n\n` +
         `Ссылка на магазин: ${SITE_URL}`
       );
-    } catch (sendError) {
-    }
+    } catch (sendError) {}
   }
 });
 
@@ -697,8 +688,7 @@ userBot.onText(/\/profile/, async (msg) => {
             reply_markup: keyboard
           });
           return;
-        } catch (photoError) {
-        }
+        } catch (photoError) {}
       }
       
       await userBot.sendMessage(chatId, profileText, { reply_markup: keyboard });
@@ -1449,13 +1439,6 @@ adminBot.on('message', async (msg) => {
   if (userState.action === 'support_reply') {
     const dialogId = userState.dialog_id;
     
-    delete userStates[chatId];
-    
-    if (!text) {
-      adminBot.sendMessage(chatId, '❌ Сообщение не может быть пустым');
-      return;
-    }
-    
     try {
       const dialogInfo = await pool.query(
         'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
@@ -1463,7 +1446,8 @@ adminBot.on('message', async (msg) => {
       );
       
       if (dialogInfo.rows.length === 0) {
-        adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+        await adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+        delete userStates[chatId];
         return;
       }
       
@@ -1497,14 +1481,17 @@ adminBot.on('message', async (msg) => {
         }
       }
       
-      adminBot.sendMessage(
+      await adminBot.sendMessage(
         chatId, 
         `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
       );
       
+      delete userStates[chatId];
+      
     } catch (error) {
       console.error('❌ Ошибка отправки ответа в поддержку:', error);
-      adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа. Попробуйте еще раз.');
+      await adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа. Попробуйте еще раз.');
+      delete userStates[chatId];
     }
     return;
   }
@@ -1568,57 +1555,8 @@ adminBot.on('callback_query', async (callbackQuery) => {
     return;
   }
   
-  if (data === 'show_filters') {
-    await showFilterOptions(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (data === 'clear_filters') {
-    const chatId = msg.chat.id;
-    delete filterStates[chatId];
-    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '✅ Фильтр сброшен' });
-    await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
-    return;
-  }
-  
-  if (data.startsWith('filter_date:')) {
-    const filterType = data.split(':')[1];
-    await handleDateFilter(msg, filterType, callbackQuery.id);
-    return;
-  }
-  
-  if (data === 'filter_user_prompt') {
-    const chatId = msg.chat.id;
-    userStates[chatId] = {
-      action: 'filter_user_id'
-    };
-    await adminBot.editMessageText('👤 Введите ID пользователя для фильтрации заказов:', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-  
-  if (data.startsWith('order_detail:')) {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const page = parts[2] || 1;
-    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-  
-  if (data.startsWith('orders_page:')) {
-    const page = data.split(':')[1];
-    await handleOrdersPage(msg, page, callbackQuery.id);
-    return;
-  }
-
-  const [action, value] = data.split(':');
-  
-  if (action === 'support_reply') {
-    const dialogId = parseInt(value);
+  if (data.startsWith('support_reply:')) {
+    const dialogId = parseInt(data.split(':')[1]);
     
     userStates[msg.chat.id] = {
       action: 'support_reply',
@@ -1637,8 +1575,8 @@ adminBot.on('callback_query', async (callbackQuery) => {
     return;
   }
   
-  else if (action === 'support_close') {
-    const dialogId = parseInt(value);
+  if (data.startsWith('support_close:')) {
+    const dialogId = parseInt(data.split(':')[1]);
     
     try {
       const dialogInfo = await pool.query(
@@ -1703,6 +1641,55 @@ adminBot.on('callback_query', async (callbackQuery) => {
     return;
   }
 
+  if (data === 'show_filters') {
+    await showFilterOptions(msg, callbackQuery.id);
+    return;
+  }
+  
+  if (data === 'clear_filters') {
+    const chatId = msg.chat.id;
+    delete filterStates[chatId];
+    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '✅ Фильтр сброшен' });
+    await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
+    return;
+  }
+  
+  if (data.startsWith('filter_date:')) {
+    const filterType = data.split(':')[1];
+    await handleDateFilter(msg, filterType, callbackQuery.id);
+    return;
+  }
+  
+  if (data === 'filter_user_prompt') {
+    const chatId = msg.chat.id;
+    userStates[chatId] = {
+      action: 'filter_user_id'
+    };
+    await adminBot.editMessageText('👤 Введите ID пользователя для фильтрации заказов:', {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (data.startsWith('order_detail:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const page = parts[2] || 1;
+    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
+    await adminBot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
+  
+  if (data.startsWith('orders_page:')) {
+    const page = data.split(':')[1];
+    await handleOrdersPage(msg, page, callbackQuery.id);
+    return;
+  }
+
+  const [action, value] = data.split(':');
+  
   if (action === 'request_code') {
     const orderId = value;
     await handleRequestCode(orderId, msg, callbackQuery.id);
@@ -3514,6 +3501,196 @@ async function handleBackToOrders(msg, page = 1) {
   }
 }
 
+// API endpoints
+app.post('/api/support/message', upload.single('file'), async (req, res) => {
+  try {
+    let user_id, message, dialog_id;
+    let fileData = null;
+
+    if (req.file) {
+      user_id = req.body.user_id;
+      dialog_id = req.body.dialog_id;
+      message = req.body.message || '';
+      
+      const base64File = req.file.buffer.toString('base64');
+      const mimeType = req.file.mimetype;
+      const dataUrl = `data:${mimeType};base64,${base64File}`;
+      
+      fileData = {
+        name: req.file.originalname,
+        size: req.file.size,
+        type: req.file.mimetype,
+        url: dataUrl
+      };
+    } else {
+      user_id = req.body.user_id;
+      message = req.body.message;
+      dialog_id = req.body.dialog_id;
+    }
+
+    if (!user_id || (!message && !fileData)) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    let dialogId = dialog_id;
+
+    if (!dialogId) {
+      const existingDialog = await pool.query(
+        'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+        [user_id, 'active']
+      );
+      
+      if (existingDialog.rows.length > 0) {
+        dialogId = existingDialog.rows[0].id;
+      } else {
+        const newDialog = await pool.query(
+          'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
+          [user_id, 'active']
+        );
+        dialogId = newDialog.rows[0].id;
+      }
+    }
+
+    let finalMessage = message;
+    let metadata = {};
+
+    if (fileData) {
+      metadata.file = fileData;
+      finalMessage = finalMessage || `[Файл: ${fileData.name}]`;
+    }
+
+    const result = await pool.query(
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message, metadata) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [dialogId, user_id, 'user', finalMessage, metadata]
+    );
+
+    await pool.query(
+      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [dialogId]
+    );
+
+    const userResult = await pool.query(
+      'SELECT username FROM users WHERE id = $1',
+      [user_id]
+    );
+
+    const username = userResult.rows[0]?.username || `ID ${user_id}`;
+
+    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
+    
+    if (message) {
+      adminMessage += `📝 ${message}\n`;
+    }
+    
+    if (fileData) {
+      const fileSize = (fileData.size / 1024).toFixed(1);
+      adminMessage += `📎 Файл: ${fileData.name} (${fileSize} KB)\n`;
+    }
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
+        ]
+      ]
+    };
+
+    try {
+      await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+    } catch (botError) {
+      console.error('Ошибка отправки уведомления админу:', botError);
+    }
+
+    res.json({
+      success: true,
+      message: result.rows[0],
+      dialog_id: dialogId
+    });
+
+  } catch (error) {
+    console.error('Ошибка отправки сообщения:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/history/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 ORDER BY created_at ASC',
+      [dialogId]
+    );
+    
+    await pool.query(
+      'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
+      [dialogId, 'admin']
+    );
+    
+    res.json({
+      success: true,
+      messages: messages.rows,
+      dialog_id: dialogId
+    });
+    
+  } catch (error) {
+    console.error('Ошибка получения истории:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/new/:userId/:lastId', async (req, res) => {
+  try {
+    const { userId, lastId } = req.params;
+    const lastMessageId = parseInt(lastId) || 0;
+    
+    const dialog = await pool.query(
+      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      [userId, 'active']
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, messages: [] });
+    }
+    
+    const dialogId = dialog.rows[0].id;
+    
+    const messages = await pool.query(
+      'SELECT * FROM support_messages WHERE dialog_id = $1 AND id > $2 ORDER BY created_at ASC',
+      [dialogId, lastMessageId]
+    );
+    
+    if (messages.rows.length > 0) {
+      await pool.query(
+        'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
+        [dialogId, 'admin', lastMessageId]
+      );
+    }
+    
+    res.json({
+      success: true,
+      messages: messages.rows
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки новых сообщений:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 app.post('/api/auth/start-register', async (req, res) => {
   try {
     const token = crypto.randomBytes(16).toString('hex');
@@ -4426,203 +4603,6 @@ app.get('/api/firebase-config', (req, res) => {
   });
 });
 
-app.get('/api/support/dialogs', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT d.*, u.username, 
-             (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id AND read = false AND sender = 'user') as unread
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.status = 'active'
-      ORDER BY d.updated_at DESC
-    `);
-    
-    res.json({
-      success: true,
-      dialogs: result.rows
-    });
-  } catch (error) {
-    console.error('Ошибка получения диалогов:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.get('/api/support/messages/:dialogId', async (req, res) => {
-  try {
-    const { dialogId } = req.params;
-    
-    const dialogResult = await pool.query(
-      'SELECT user_id FROM support_dialogs WHERE id = $1',
-      [dialogId]
-    );
-    
-    if (dialogResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Dialog not found' });
-    }
-    
-    const messages = await pool.query(`
-      SELECT * FROM support_messages 
-      WHERE dialog_id = $1 
-      ORDER BY created_at ASC
-    `, [dialogId]);
-    
-    res.json({
-      success: true,
-      messages: messages.rows
-    });
-  } catch (error) {
-    console.error('Ошибка получения сообщений:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.post('/api/support/message', async (req, res) => {
-  try {
-    const { user_id, message, dialog_id } = req.body;
-    
-    if (!user_id || !message) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-    
-    let dialogId = dialog_id;
-    
-    if (!dialogId) {
-      const existingDialog = await pool.query(
-        'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-        [user_id, 'active']
-      );
-      
-      if (existingDialog.rows.length > 0) {
-        dialogId = existingDialog.rows[0].id;
-      } else {
-        const newDialog = await pool.query(
-          'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
-          [user_id, 'active']
-        );
-        dialogId = newDialog.rows[0].id;
-      }
-    }
-    
-    const result = await pool.query(
-      `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [dialogId, user_id, 'user', message]
-    );
-    
-    await pool.query(
-      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [dialogId]
-    );
-    
-    const userResult = await pool.query(
-      'SELECT username FROM users WHERE id = $1',
-      [user_id]
-    );
-    
-    const username = userResult.rows[0]?.username || `ID ${user_id}`;
-    
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
-          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
-        ]
-      ]
-    };
-    
-    await adminBot.sendMessage(
-      ADMIN_ID,
-      `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n📝 ${message}`,
-      { reply_markup: keyboard }
-    );
-    
-    res.json({
-      success: true,
-      message: result.rows[0]
-    });
-    
-  } catch (error) {
-    console.error('Ошибка отправки сообщения:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.get('/api/support/history/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-      [userId, 'active']
-    );
-    
-    if (dialog.rows.length === 0) {
-      return res.json({ success: true, messages: [] });
-    }
-    
-    const dialogId = dialog.rows[0].id;
-    
-    const messages = await pool.query(
-      'SELECT * FROM support_messages WHERE dialog_id = $1 ORDER BY created_at ASC',
-      [dialogId]
-    );
-    
-    await pool.query(
-      'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
-      [dialogId, 'admin']
-    );
-    
-    res.json({
-      success: true,
-      messages: messages.rows,
-      dialog_id: dialogId
-    });
-    
-  } catch (error) {
-    console.error('Ошибка получения истории:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.get('/api/support/new/:userId/:lastId', async (req, res) => {
-  try {
-    const { userId, lastId } = req.params;
-    const lastMessageId = parseInt(lastId) || 0;
-    
-    const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-      [userId, 'active']
-    );
-    
-    if (dialog.rows.length === 0) {
-      return res.json({ success: true, messages: [] });
-    }
-    
-    const dialogId = dialog.rows[0].id;
-    
-    const messages = await pool.query(
-      'SELECT * FROM support_messages WHERE dialog_id = $1 AND id > $2 ORDER BY created_at ASC',
-      [dialogId, lastMessageId]
-    );
-    
-    if (messages.rows.length > 0) {
-      await pool.query(
-        'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
-        [dialogId, 'admin', lastMessageId]
-      );
-    }
-    
-    res.json({
-      success: true,
-      messages: messages.rows
-    });
-    
-  } catch (error) {
-    console.error('Ошибка проверки новых сообщений:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
 async function sendNewOrderNotification(orderId, total, email) {
   try {
     const result = await pool.query(
@@ -4658,192 +4638,6 @@ async function sendNewOrderNotification(orderId, total, email) {
     console.error('Ошибка отправки уведомления:', error);
   }
 }
-
-app.post('/api/support/message', async (req, res) => {
-  try {
-    let user_id, message, dialog_id;
-    let fileData = null;
-
-    if (req.is('multipart/form-data')) {
-      user_id = req.body.user_id;
-      dialog_id = req.body.dialog_id;
-      message = req.body.message || '';
-      
-      if (req.files && req.files.file) {
-        const file = req.files.file;
-        const fileUrl = await uploadFile(file);
-        fileData = {
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          url: fileUrl
-        };
-      }
-    } else {
-      user_id = req.body.user_id;
-      message = req.body.message;
-      dialog_id = req.body.dialog_id;
-    }
-
-    if (!user_id || (!message && !fileData)) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-
-    let dialogId = dialog_id;
-
-    if (!dialogId) {
-      const existingDialog = await pool.query(
-        'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-        [user_id, 'active']
-      );
-      
-      if (existingDialog.rows.length > 0) {
-        dialogId = existingDialog.rows[0].id;
-      } else {
-        const newDialog = await pool.query(
-          'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
-          [user_id, 'active']
-        );
-        dialogId = newDialog.rows[0].id;
-      }
-    }
-
-    let finalMessage = message;
-    let metadata = {};
-
-    if (fileData) {
-      metadata.file = fileData;
-      finalMessage = finalMessage || `[Файл: ${fileData.name}]`;
-    }
-
-    const result = await pool.query(
-      `INSERT INTO support_messages (dialog_id, user_id, sender, message, metadata) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [dialogId, user_id, 'user', finalMessage, metadata]
-    );
-
-    await pool.query(
-      'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [dialogId]
-    );
-
-    const userResult = await pool.query(
-      'SELECT username FROM users WHERE id = $1',
-      [user_id]
-    );
-
-    const username = userResult.rows[0]?.username || `ID ${user_id}`;
-
-    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
-    
-    if (message) {
-      adminMessage += `📝 ${message}\n`;
-    }
-    
-    if (fileData) {
-      adminMessage += `📎 Файл: ${fileData.name} (${(fileData.size / 1024).toFixed(1)} KB)\n${fileData.url}`;
-    }
-
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
-          { text: '✅ Закрыть', callback_data: `support_close:${dialogId}` }
-        ]
-      ]
-    };
-
-    await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
-
-    res.json({
-      success: true,
-      message: result.rows[0],
-      dialog_id: dialogId
-    });
-
-  } catch (error) {
-    console.error('Ошибка отправки сообщения:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.get('/api/support/history/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-      [userId, 'active']
-    );
-    
-    if (dialog.rows.length === 0) {
-      return res.json({ success: true, messages: [] });
-    }
-    
-    const dialogId = dialog.rows[0].id;
-    
-    const messages = await pool.query(
-      'SELECT * FROM support_messages WHERE dialog_id = $1 ORDER BY created_at ASC',
-      [dialogId]
-    );
-    
-    await pool.query(
-      'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2',
-      [dialogId, 'admin']
-    );
-    
-    res.json({
-      success: true,
-      messages: messages.rows,
-      dialog_id: dialogId
-    });
-    
-  } catch (error) {
-    console.error('Ошибка получения истории:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-app.get('/api/support/new/:userId/:lastId', async (req, res) => {
-  try {
-    const { userId, lastId } = req.params;
-    const lastMessageId = parseInt(lastId) || 0;
-    
-    const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
-      [userId, 'active']
-    );
-    
-    if (dialog.rows.length === 0) {
-      return res.json({ success: true, messages: [] });
-    }
-    
-    const dialogId = dialog.rows[0].id;
-    
-    const messages = await pool.query(
-      'SELECT * FROM support_messages WHERE dialog_id = $1 AND id > $2 ORDER BY created_at ASC',
-      [dialogId, lastMessageId]
-    );
-    
-    if (messages.rows.length > 0) {
-      await pool.query(
-        'UPDATE support_messages SET read = true WHERE dialog_id = $1 AND sender = $2 AND id > $3',
-        [dialogId, 'admin', lastMessageId]
-      );
-    }
-    
-    res.json({
-      success: true,
-      messages: messages.rows
-    });
-    
-  } catch (error) {
-    console.error('Ошибка проверки новых сообщений:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
-  }
-});
-
-
 
 async function loadSampleProducts() {
   try {
@@ -4889,8 +4683,8 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`🚀 Сервер запущен на порту ${PORT}`);
       console.log(`📞 API доступен по адресу: ${SERVER_URL}`);
-      console.log(`🤖 Админ бот запущен: @${adminBot.options?.username || 'unknown'}`);
-      console.log(`🤖 Бот для пользователей запущен: @${userBot.options?.username || 'unknown'}`);
+      console.log(`🤖 Админ бот запущен`);
+      console.log(`🤖 Бот для пользователей запущен`);
       console.log(`👑 Админ ID: ${ADMIN_ID}`);
       console.log(`🌐 Сайт: ${SITE_URL}`);
       
