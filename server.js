@@ -3720,7 +3720,8 @@ app.get('/api/support/history/:userId', async (req, res) => {
     res.json({
       success: true,
       messages: messagesWithFlags,
-      dialog_id: dialogId
+      dialog_id: dialogId,
+      is_closed: dialog.rows[0].status === 'closed'
     });
     
   } catch (error) {
@@ -3735,7 +3736,7 @@ app.get('/api/support/new/:userId/:lastId', async (req, res) => {
     const lastMessageId = parseInt(lastId) || 0;
     
     const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      'SELECT id, status FROM support_dialogs WHERE user_id = $1 AND status = $2',
       [userId, 'active']
     );
     
