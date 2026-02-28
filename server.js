@@ -1481,7 +1481,8 @@ adminBot.on('message', async (msg) => {
           console.error('Ошибка отправки уведомления пользователю:', notifyError);
         }
       }
-      
+
+    
       await adminBot.sendMessage(
         chatId, 
         `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
@@ -1530,301 +1531,313 @@ adminBot.on('message', async (msg) => {
   }
 });
 
-adminBot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const data = callbackQuery.data;
-  
-  if (!isAdmin(callbackQuery)) {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '⛔ Доступ запрещен',
-      show_alert: true 
-    });
-    return;
+adminBot.on('callback_query', async (cb) => {
+  const data = cb.data;
+  const chatId = cb.message.chat.id;
+  const messageId = cb.message.message_id;
+
+  if (cb.from.id !== ADMIN_ID) {
+    return adminBot.answerCallbackQuery(cb.id, { text: '⛔ Доступ запрещён', show_alert: true });
   }
 
-  console.log('📩 Callback получен:', data);
+  console.log('Callback получен:', data);
+
+  if (data.startsWith('dialogs_filter:')) {
+    const filter = data.split(':')[1];
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.sendMessage(chatId, `/dialogs ${filter}`);
+    return adminBot.answerCallbackQuery(cb.id);
+  }
 
   if (data.startsWith('support_view:')) {
-    const dialogId = data.split(':')[1];
-    await showSupportDialog(msg, dialogId, callbackQuery.id);
-    return;
-  }
-  
-  if (data.startsWith('support_userinfo:')) {
-    const userId = data.split(':')[1];
-    await showUserInfo(msg, userId, callbackQuery.id);
-    return;
-  }
-  
-  if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
-    
-    userStates[msg.chat.id] = {
-      action: 'support_reply',
-      dialog_id: dialogId
-    };
-    
-    await adminBot.sendMessage(
-      msg.chat.id,
-      `✉️ Введите ответ для диалога #${dialogId}:`
-    );
-    
-    await adminBot.answerCallbackQuery(callbackQuery.id, { 
-      text: '✉️ Введите ваш ответ',
-      show_alert: false 
-    });
-    return;
-  }
-  
-  if (data.startsWith('support_close:')) {
-    const dialogId = parseInt(data.split(':')[1]);
-    
+
     try {
-      const dialogInfo = await pool.query(
-        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-        [dialogId, 'active']
-      );
-      
-      if (dialogInfo.rows.length > 0) {
-        const userId = dialogInfo.rows[0].user_id;
-        
-        await pool.query(
-          'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
-          ['closed', dialogId]
-        );
-        
-        const userResult = await pool.query('SELECT tg_id FROM users WHERE id = $1', [userId]);
-        
-        if (userResult.rows.length > 0) {
-          try {
-            await userBot.sendMessage(
-              userResult.rows[0].tg_id,
-              `✅ Диалог #${dialogId} был закрыт администратором.\nСпасибо за обращение!`
-            );
-          } catch (e) {
-            console.error('Ошибка уведомления пользователя:', e);
-          }
-        }
-        
-        await adminBot.editMessageText(
-          `✅ Диалог #${dialogId} успешно закрыт`,
-          {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id
-          }
-        );
-        
-        await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '✅ Диалог закрыт',
-          show_alert: false
-        });
-      } else {
-        await adminBot.editMessageText(
-          `❌ Диалог #${dialogId} уже закрыт или не найден`,
-          {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id
-          }
-        );
-        
-        await adminBot.answerCallbackQuery(callbackQuery.id, { 
-          text: '❌ Диалог уже закрыт',
-          show_alert: true 
-        });
+      const dialogRes = await pool.query(`
+        SELECT d.*, u.username, u.tg_id, u.first_name, u.last_name
+        FROM support_dialogs d
+        JOIN users u ON d.user_id = u.id
+        WHERE d.id = $1
+      `, [dialogId]);
+
+      if (dialogRes.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
       }
-    } catch (error) {
-      console.error('❌ Ошибка закрытия диалога:', error);
-      await adminBot.answerCallbackQuery(callbackQuery.id, { 
-        text: '❌ Ошибка закрытия диалога',
-        show_alert: true 
+
+      const dialog = dialogRes.rows[0];
+
+      const msgs = await pool.query(`
+        SELECT sender, message, metadata, created_at
+        FROM support_messages
+        WHERE dialog_id = $1
+        ORDER BY created_at ASC
+      `, [dialogId]);
+
+      let text = `💬 Диалог #${dialogId}\n\n`;
+      text += `👤 ${dialog.username || dialog.tg_id || 'Аноним'}\n`;
+      text += `Статус: ${dialog.status === 'active' ? '🟢 Активен' : '🔴 Закрыт'}\n`;
+      text += `Сообщений: ${msgs.rows.length}\n\n────────────────────\n`;
+
+      msgs.rows.forEach(m => {
+        const sender = m.sender === 'user' ? '👤' : '🛠️';
+        text += `${sender} ${new Date(m.created_at).toLocaleString('ru-RU')}\n`;
+        if (m.metadata?.file) {
+          text += m.metadata.file.isImage ? `[Фото: ${m.metadata.file.name}]\n` : `[Файл: ${m.metadata.file.name}]\n`;
+        } else {
+          text += `${m.message || '[без текста]'}\n`;
+        }
+        text += '────────────────────\n';
       });
+
+      const kb = {
+        inline_keyboard: [
+          [
+            { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+            { text: dialog.status === 'active' ? '🔒 Закрыть' : '🔓 Открыть', callback_data: `support_toggle:${dialogId}` }
+          ],
+          [{ text: '← Назад к списку', callback_data: 'dialogs_all' }]
+        ]
+      };
+
+      await adminBot.sendMessage(chatId, text, { reply_markup: kb });
+      await adminBot.deleteMessage(chatId, messageId);
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (err) {
+      console.error('Ошибка при открытии диалога:', err);
+      await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка загрузки диалога', show_alert: true });
     }
     return;
   }
 
-  if (data === 'show_filters') {
-    await showFilterOptions(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (data === 'clear_filters') {
-    const chatId = msg.chat.id;
-    delete filterStates[chatId];
-    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '✅ Фильтр сброшен' });
-    await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
-    return;
-  }
-  
-  if (data.startsWith('filter_date:')) {
-    const filterType = data.split(':')[1];
-    await handleDateFilter(msg, filterType, callbackQuery.id);
-    return;
-  }
-  
-  if (data === 'filter_user_prompt') {
-    const chatId = msg.chat.id;
+  if (data.startsWith('support_reply:')) {
+    const dialogId = parseInt(data.split(':')[1]);
+
     userStates[chatId] = {
-      action: 'filter_user_id'
+      action: 'support_reply',
+      dialog_id: dialogId
     };
-    await adminBot.editMessageText('👤 Введите ID пользователя для фильтрации заказов:', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
-    });
-    await adminBot.answerCallbackQuery(callbackQuery.id);
+
+    await adminBot.sendMessage(
+      chatId,
+      `✉️ Введите ответ для диалога #${dialogId}:`
+    );
+
+    await adminBot.answerCallbackQuery(cb.id, { text: 'Введите ответ', show_alert: false });
     return;
   }
-  
+
+  if (data.startsWith('support_toggle:')) {
+    const dialogId = parseInt(data.split(':')[1]);
+
+    try {
+      const dialog = await pool.query(
+        'SELECT status FROM support_dialogs WHERE id = $1',
+        [dialogId]
+      );
+
+      if (dialog.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
+      }
+
+      const newStatus = dialog.rows[0].status === 'active' ? 'closed' : 'active';
+
+      await pool.query(
+        'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        [newStatus, dialogId]
+      );
+
+      const userRes = await pool.query(
+        'SELECT tg_id FROM users WHERE id = (SELECT user_id FROM support_dialogs WHERE id = $1)',
+        [dialogId]
+      );
+
+      if (userRes.rows.length > 0) {
+        const tgId = userRes.rows[0].tg_id;
+        await userBot.sendMessage(
+          tgId,
+          newStatus === 'closed'
+            ? `✅ Диалог #${dialogId} закрыт администратором. Спасибо за обращение!`
+            : `🔓 Диалог #${dialogId} снова открыт. Можете продолжить общение.`
+        );
+      }
+
+      await adminBot.editMessageText(
+        `✅ Диалог #${dialogId} теперь ${newStatus === 'active' ? 'активен' : 'закрыт'}`,
+        { chat_id: chatId, message_id: messageId }
+      );
+
+      await adminBot.answerCallbackQuery(cb.id, {
+        text: `Диалог ${newStatus === 'active' ? 'открыт' : 'закрыт'}`,
+        show_alert: false
+      });
+    } catch (err) {
+      console.error('Ошибка переключения статуса диалога:', err);
+      await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка', show_alert: true });
+    }
+    return;
+  }
+
   if (data.startsWith('order_detail:')) {
     const parts = data.split(':');
     const orderId = parts[1];
     const page = parts[2] || 1;
-    await showOrderDetails(msg.chat.id, msg.message_id, orderId, page);
-    await adminBot.answerCallbackQuery(callbackQuery.id);
+    await showOrderDetails(chatId, messageId, orderId, page);
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
-  
+
   if (data.startsWith('orders_page:')) {
     const page = data.split(':')[1];
-    await handleOrdersPage(msg, page, callbackQuery.id);
+    await handleOrdersPage(cb.message, page, cb.id);
     return;
   }
 
-  const [action, value] = data.split(':');
-  
-  if (action === 'request_code') {
-    const orderId = value;
-    await handleRequestCode(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'order_ready') {
-    const orderId = value;
-    await handleOrderReady(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'wrong_code') {
-    const orderId = value;
-    await handleWrongCode(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'mark_completed') {
-    const orderId = value;
-    await handleMarkCompleted(orderId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'back_to_orders') {
-    const page = value || 1;
-    await handleBackToOrders(msg, page);
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'force_complete') {
-    const orderId = value;
-    await completeOrder(orderId, msg, callbackQuery.id);
+  if (data === 'show_filters') {
+    await showFilterOptions(cb.message, cb.id);
     return;
   }
 
-  if (action === 'cancel_order') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleCancelOrder(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_cancel_order') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmCancelOrder(orderId, msg, callbackQuery.id, returnPage);
+  if (data === 'clear_filters') {
+    delete filterStates[chatId];
+    await adminBot.answerCallbackQuery(cb.id, { text: '✅ Фильтр сброшен' });
+    await adminBot.emit('text', { ...cb.message, text: '/orders 1', chat: { id: chatId } });
     return;
   }
 
-  if (action === 'process_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleProcessRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'cancel_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleCancelRefund(orderId, msg, callbackQuery.id, returnPage);
-    return;
-  }
-  
-  if (action === 'confirm_cancel_refund') {
-    const parts = data.split(':');
-    const orderId = parts[1];
-    const returnPage = parts[2] || 1;
-    await handleConfirmCancelRefund(orderId, msg, callbackQuery.id, returnPage);
+  if (data.startsWith('filter_date:')) {
+    const filterType = data.split(':')[1];
+    await handleDateFilter(cb.message, filterType, cb.id);
     return;
   }
 
-  if (action === 'add_product_prompt') {
-    await adminBot.answerCallbackQuery(callbackQuery.id);
-    adminBot.sendMessage(msg.chat.id, '📝 Отправьте команду /add_product чтобы начать добавление товара');
-    return;
-  }
-  
-  if (action === 'edit_price_list') {
-    await handleEditPriceList(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'edit_price') {
-    const productId = value;
-    await handleEditPrice(productId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'delete_product_list') {
-    await handleDeleteProductList(msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'delete_product') {
-    const productId = value;
-    await handleDeleteProduct(productId, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'set_gift') {
-    const isGift = value;
-    await handleSetGift(isGift, msg, callbackQuery.id);
-    return;
-  }
-  
-  if (action === 'cancel_add_product') {
-    await adminBot.answerCallbackQuery(callbackQuery.id, { text: '❌ Добавление отменено' });
-    await adminBot.editMessageText('❌ Добавление товара отменено.', {
-      chat_id: msg.chat.id,
-      message_id: msg.message_id
+  if (data === 'filter_user_prompt') {
+    userStates[chatId] = { action: 'filter_user_id' };
+    await adminBot.editMessageText('👤 Введите ID пользователя для фильтрации заказов:', {
+      chat_id: chatId,
+      message_id: messageId
     });
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
 
-  await adminBot.answerCallbackQuery(callbackQuery.id, { 
+  if (data.startsWith('request_code:')) {
+    const orderId = data.split(':')[1];
+    await handleRequestCode(orderId, cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('order_ready:')) {
+    const orderId = data.split(':')[1];
+    await handleOrderReady(orderId, cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('wrong_code:')) {
+    const orderId = data.split(':')[1];
+    await handleWrongCode(orderId, cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('mark_completed:')) {
+    const orderId = data.split(':')[1];
+    await handleMarkCompleted(orderId, cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('back_to_orders:')) {
+    const page = data.split(':')[1] || 1;
+    await handleBackToOrders(cb.message, page);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data.startsWith('force_complete:')) {
+    const orderId = data.split(':')[1];
+    await completeOrder(orderId, cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('cancel_order:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelOrder(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data.startsWith('confirm_cancel_order:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelOrder(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data.startsWith('process_refund:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleProcessRefund(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data.startsWith('confirm_refund:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmRefund(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data.startsWith('cancel_refund:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleCancelRefund(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data.startsWith('confirm_cancel_refund:')) {
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const returnPage = parts[2] || 1;
+    await handleConfirmCancelRefund(orderId, cb.message, cb.id, returnPage);
+    return;
+  }
+
+  if (data === 'add_product_prompt') {
+    await adminBot.answerCallbackQuery(cb.id);
+    adminBot.sendMessage(chatId, '📝 Отправьте команду /add_product чтобы начать добавление товара');
+    return;
+  }
+
+  if (data === 'edit_price_list') {
+    await handleEditPriceList(cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('edit_price:')) {
+    const productId = data.split(':')[1];
+    await handleEditPrice(productId, cb.message, cb.id);
+    return;
+  }
+
+  if (data === 'delete_product_list') {
+    await handleDeleteProductList(cb.message, cb.id);
+    return;
+  }
+
+  if (data.startsWith('delete_product:')) {
+    const productId = data.split(':')[1];
+    await handleDeleteProduct(productId, cb.message, cb.id);
+    return;
+  }
+
+  await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
-    show_alert: true 
+    show_alert: true
   });
 });
-
 async function showFilterOptions(msg, callbackQueryId) {
   const keyboard = {
     inline_keyboard: [
@@ -2043,57 +2056,62 @@ async function showUserInfo(msg, userId, callbackQueryId) {
   }
 }
 
-adminBot.onText(/\/dialogs/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  
+adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
+  if (msg.from.id !== ADMIN_ID) return;
+
+  const filter = match[1] || 'all';
+
+  let query = `
+    SELECT 
+      d.id, d.status, d.updated_at, d.created_at,
+      u.username, u.tg_id, u.first_name, u.last_name,
+      (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id) as msg_count
+    FROM support_dialogs d
+    JOIN users u ON d.user_id = u.id
+  `;
+
+  const params = [];
+
+  if (filter === 'active') {
+    query += ` WHERE d.status = 'active'`;
+  } else if (filter === 'closed') {
+    query += ` WHERE d.status = 'closed'`;
+  }
+
+  query += ` ORDER BY d.updated_at DESC LIMIT 50`;
+
   try {
-    const dialogs = await pool.query(`
-      SELECT 
-        d.id, 
-        d.status, 
-        d.updated_at,
-        u.id as user_id,
-        u.username,
-        u.tg_id,
-        u.telegram_username,
-        (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id) as msg_count
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.status = 'active'
-      ORDER BY d.updated_at DESC
-    `);
-    
-    const totalDialogs = dialogs.rows.length;
-    
-    if (totalDialogs === 0) {
-      await adminBot.sendMessage(msg.chat.id, '📭 Нет активных обращений в поддержку.');
-      return;
+    const { rows } = await pool.query(query, params);
+
+    if (rows.length === 0) {
+      return adminBot.sendMessage(msg.chat.id, `📭 Нет диалогов в категории "${filter}"`);
     }
-    
-    let statsText = `📊 **Всего обращений:** ${totalDialogs}\n\n`;
-    statsText += `👇 **Выберите диалог:**`;
-    
+
+    let text = `💬 Диалоги (${filter.toUpperCase()}) — ${rows.length} шт.\n\n`;
+
     const keyboard = {
-      inline_keyboard: dialogs.rows.map(d => {
-        const date = new Date(d.updated_at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-        const userName = d.username || `ID ${d.user_id}`;
-        const shortName = userName.length > 15 ? userName.substring(0, 12) + '…' : userName;
-        
+      inline_keyboard: rows.map(row => {
+        const date = new Date(row.updated_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+        const statusEmoji = row.status === 'active' ? '🟢' : '🔴';
+        const name = row.username || row.first_name || `ID ${row.tg_id}`;
+        const shortName = name.length > 18 ? name.substring(0, 15) + '…' : name;
         return [{
-          text: `#${d.id} | ${shortName} | (${d.msg_count} сообщ.) | ${date}`,
-          callback_data: `support_view:${d.id}`
+          text: `${statusEmoji} #${row.id} | ${shortName} | ${row.msg_count} смс | ${date}`,
+          callback_data: `support_view:${row.id}`
         }];
       })
     };
-    
-    await adminBot.sendMessage(msg.chat.id, statsText, { 
-      parse_mode: 'Markdown',
-      reply_markup: keyboard 
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка получения диалогов:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка обращений.');
+
+    keyboard.inline_keyboard.unshift([
+      { text: 'Все', callback_data: 'dialogs_filter:all' },
+      { text: 'Активные', callback_data: 'dialogs_filter:active' },
+      { text: 'Завершённые', callback_data: 'dialogs_filter:closed' }
+    ]);
+
+    adminBot.sendMessage(msg.chat.id, text, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('Ошибка /dialogs:', err);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка загрузки диалогов');
   }
 });
 
@@ -3502,7 +3520,6 @@ async function handleBackToOrders(msg, page = 1) {
   }
 }
 
-// API endpoints
 app.post('/api/support/message', upload.single('file'), async (req, res) => {
   try {
     let user_id, message, dialog_id;
@@ -3512,17 +3529,15 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
       user_id = req.body.user_id;
       dialog_id = req.body.dialog_id;
       message = req.body.message || '';
-      
+
       const mimeType = req.file.mimetype;
       const isImage = mimeType.startsWith('image/');
-      
+
       let fileBuffer = req.file.buffer;
       let finalMimeType = mimeType;
-      
-      // Если это изображение, оптимизируем его
+
       if (isImage) {
         try {
-          // Оптимизируем изображение: уменьшаем размер, конвертируем в JPEG
           fileBuffer = await sharp(req.file.buffer)
             .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
             .jpeg({ quality: 80, progressive: true })
@@ -3530,16 +3545,12 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
           finalMimeType = 'image/jpeg';
         } catch (sharpError) {
           console.error('Ошибка оптимизации изображения:', sharpError);
-          // Если ошибка, используем оригинал
-          fileBuffer = req.file.buffer;
         }
       }
-      
-      // Конвертируем в base64
+
       const base64File = fileBuffer.toString('base64');
       const dataUrl = `data:${finalMimeType};base64,${base64File}`;
-      
-      // Для изображений создаём preview
+
       let preview = null;
       if (isImage) {
         try {
@@ -3547,13 +3558,12 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
             .resize(200, 200, { fit: 'cover' })
             .jpeg({ quality: 70 })
             .toBuffer();
-          const previewBase64 = previewBuffer.toString('base64');
-          preview = `data:image/jpeg;base64,${previewBase64}`;
+          preview = `data:image/jpeg;base64,${previewBuffer.toString('base64')}`;
         } catch (previewError) {
           console.error('Ошибка создания preview:', previewError);
         }
       }
-      
+
       fileData = {
         name: req.file.originalname,
         size: fileBuffer.length,
@@ -3561,7 +3571,7 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
         url: dataUrl,
         isImage: isImage,
         preview: preview,
-        thumbnail: preview // для совместимости
+        thumbnail: preview
       };
     } else {
       user_id = req.body.user_id;
@@ -3574,15 +3584,14 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     }
 
     let dialogId = dialog_id;
-
     if (!dialogId) {
-      const existingDialog = await pool.query(
+      const existing = await pool.query(
         'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
         [user_id, 'active']
       );
-      
-      if (existingDialog.rows.length > 0) {
-        dialogId = existingDialog.rows[0].id;
+
+      if (existing.rows.length > 0) {
+        dialogId = existing.rows[0].id;
       } else {
         const newDialog = await pool.query(
           'INSERT INTO support_dialogs (user_id, status) VALUES ($1, $2) RETURNING id',
@@ -3594,14 +3603,13 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
 
     let finalMessage = message;
     let metadata = {};
-
     if (fileData) {
       metadata.file = fileData;
       finalMessage = finalMessage || (fileData.isImage ? '[Изображение]' : `[Файл: ${fileData.name}]`);
     }
 
     const result = await pool.query(
-      `INSERT INTO support_messages (dialog_id, user_id, sender, message, metadata) 
+      `INSERT INTO support_messages (dialog_id, user_id, sender, message, metadata)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [dialogId, user_id, 'user', finalMessage, metadata]
     );
@@ -3615,23 +3623,12 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
       'SELECT username FROM users WHERE id = $1',
       [user_id]
     );
-
     const username = userResult.rows[0]?.username || `ID ${user_id}`;
 
-    // Формируем сообщение для админа
     let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
-    
+
     if (message) {
       adminMessage += `📝 ${message}\n`;
-    }
-    
-    if (fileData) {
-      const fileSize = (fileData.size / 1024).toFixed(1);
-      if (fileData.isImage) {
-        adminMessage += `🖼️ Изображение: ${fileData.name} (${fileSize} KB)`;
-      } else {
-        adminMessage += `📎 Файл: ${fileData.name} (${fileSize} KB)`;
-      }
     }
 
     const keyboard = {
@@ -3644,9 +3641,17 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     };
 
     try {
-      await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+      if (fileData && fileData.isImage && fileData.url.startsWith('data:image')) {
+        await adminBot.sendPhoto(ADMIN_ID, fileData.url, {
+          caption: adminMessage,
+          reply_markup: keyboard
+        });
+      } else {
+        await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+      }
     } catch (botError) {
-      console.error('Ошибка отправки уведомления админу:', botError);
+      console.error('Ошибка отправки в админ-бот:', botError);
+      await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось отправить фото)', { reply_markup: keyboard });
     }
 
     res.json({
@@ -3654,7 +3659,6 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
       message: result.rows[0],
       dialog_id: dialogId
     });
-
   } catch (error) {
     console.error('Ошибка отправки сообщения:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
