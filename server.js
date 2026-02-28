@@ -3679,12 +3679,29 @@ app.get('/api/support/history/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     
+    // Получаем активный диалог пользователя
     const dialog = await pool.query(
-      'SELECT id FROM support_dialogs WHERE user_id = $1 AND status = $2',
+      'SELECT id, status FROM support_dialogs WHERE user_id = $1 AND status = $2',
       [userId, 'active']
     );
     
+    // Если нет активного диалога, проверяем есть ли закрытые
     if (dialog.rows.length === 0) {
+      const closedDialog = await pool.query(
+        'SELECT id, status FROM support_dialogs WHERE user_id = $1 AND status = $2 ORDER BY updated_at DESC LIMIT 1',
+        [userId, 'closed']
+      );
+      
+      if (closedDialog.rows.length > 0) {
+        // Возвращаем информацию о закрытом диалоге
+        return res.json({ 
+          success: true, 
+          messages: [],
+          is_closed: true,
+          dialog_id: closedDialog.rows[0].id
+        });
+      }
+      
       return res.json({ success: true, messages: [] });
     }
     
@@ -3726,6 +3743,32 @@ app.get('/api/support/history/:userId', async (req, res) => {
     
   } catch (error) {
     console.error('Ошибка получения истории:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/support/status/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const dialog = await pool.query(
+      'SELECT id, status FROM support_dialogs WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1',
+      [userId]
+    );
+    
+    if (dialog.rows.length === 0) {
+      return res.json({ success: true, hasDialog: false });
+    }
+    
+    res.json({
+      success: true,
+      hasDialog: true,
+      dialogId: dialog.rows[0].id,
+      is_closed: dialog.rows[0].status === 'closed'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки статуса диалога:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
