@@ -3640,19 +3640,23 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
       ]
     };
 
-    try {
-      if (fileData && fileData.isImage && fileData.url.startsWith('data:image')) {
-        await adminBot.sendPhoto(ADMIN_ID, fileData.url, {
-          caption: adminMessage,
-          reply_markup: keyboard
-        });
-      } else {
-        await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
-      }
-    } catch (botError) {
-      console.error('Ошибка отправки в админ-бот:', botError);
-      await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось отправить фото)', { reply_markup: keyboard });
-    }
+   try {
+  if (fileData && fileData.isImage) {
+    // Отправляем как буфер файла, а не как base64-URL
+    await adminBot.sendPhoto(ADMIN_ID, {
+      source: req.file.buffer,           // ← берём оригинальный буфер из multer
+      filename: req.file.originalname
+    }, {
+      caption: adminMessage,
+      reply_markup: keyboard
+    });
+  } else {
+    await adminBot.sendMessage(ADMIN_ID, adminMessage, { reply_markup: keyboard });
+  }
+} catch (botError) {
+  console.error('Ошибка отправки в админ-бот:', botError);
+  await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось отправить фото)', { reply_markup: keyboard });
+}
 
     res.json({
       success: true,
