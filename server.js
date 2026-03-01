@@ -7,6 +7,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 const cors = require('cors');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,10 +22,16 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
-// Настройка multer для загрузки файлов
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.mail.ru';
+const SMTP_PORT = process.env.SMTP_PORT || 465;
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 app.use(cors());
@@ -36,6 +43,16 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: true,
     sslmode: 'require'
+  }
+});
+
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_SECURE,
+  auth: {
+    user: SMTP_USER,
+    pass: SMTP_PASS
   }
 });
 
@@ -68,19 +85,43 @@ try {
   process.exit(1);
 }
 
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function sendVerificationCode(email, code) {
+  const mailOptions = {
+    from: SMTP_FROM,
+    to: email,
+    subject: 'Код подтверждения - Duck Shop',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto;">
+        <h2 style="color: #0b3c91;">Подтверждение входа</h2>
+        <p>Ваш код для входа в Duck Shop:</p>
+        <div style="font-size: 32px; font-weight: bold; color: #1565c0; margin: 20px 0; padding: 20px; background: #f0f4ff; border-radius: 10px; text-align: center;">
+          ${code}
+        </div>
+        <p>Код действителен 10 минут.</p>
+        <p>Если вы не запрашивали код, просто проигнорируйте это письмо.</p>
+        <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
+        <p style="color: #666; font-size: 12px;">Duck Shop - магазин игровых ценностей</p>
+      </div>
+    `
+  };
+  await transporter.sendMail(mailOptions);
+}
+
 async function generateSignature(data, password) {
   const tokenData = {
     ...data,
     password,
   };
-
   const excludedKeys = ["metadata", "signature"];
   const sortedTokenData = Object.keys(tokenData)
     .filter((key) => !excludedKeys.includes(key))
     .sort()
     .map((key) => tokenData[key])
     .join("");
-
   const hash = crypto.createHash('sha256');
   hash.update(sortedTokenData, 'utf8');
   return hash.digest('hex');
@@ -105,11 +146,14 @@ async function initDB() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        tg_id BIGINT UNIQUE NOT NULL,
+        tg_id BIGINT UNIQUE,
         username VARCHAR(100) NOT NULL,
         first_name VARCHAR(100),
         last_name VARCHAR(100),
         telegram_username VARCHAR(100),
+        email VARCHAR(255) UNIQUE,
+        email_verified BOOLEAN DEFAULT FALSE,
+        auth_provider VARCHAR(20) DEFAULT 'email',
         avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -117,10 +161,9 @@ async function initDB() {
     `);
 
     const columnsToAdd = [
-      { name: 'first_name', type: 'VARCHAR(100)' },
-      { name: 'last_name', type: 'VARCHAR(100)' },
-      { name: 'telegram_username', type: 'VARCHAR(100)' },
-      { name: 'avatar_url', type: 'TEXT' }
+      { name: 'email', type: 'VARCHAR(255) UNIQUE' },
+      { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
+      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' }
     ];
     
     for (const column of columnsToAdd) {
@@ -133,6 +176,18 @@ async function initDB() {
         console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
       }
     }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_verification (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        code VARCHAR(6) NOT NULL,
+        attempts INTEGER DEFAULT 0,
+        verified BOOLEAN DEFAULT FALSE,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -181,12 +236,6 @@ async function initDB() {
       )
     `);
 
-    try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id)');
-    } catch (e) {
-      console.log('Индекс idx_wallets_user_id уже существует:', e.message);
-    }
-
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
@@ -199,36 +248,6 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_order_id ON wallet_transactions(order_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_wallet_transactions_created_at ON wallet_transactions(created_at DESC)');
-    } catch (e) {
-      console.log('Индексы wallet_transactions уже существуют:', e.message);
-    }
-
-    try {
-      await pool.query(`
-        CREATE OR REPLACE FUNCTION update_wallet_timestamp()
-        RETURNS TRIGGER AS $$
-        BEGIN
-          NEW.updated_at = CURRENT_TIMESTAMP;
-          RETURN NEW;
-        END;
-        $$ language 'plpgsql';
-      `);
-
-      await pool.query(`
-        DROP TRIGGER IF EXISTS update_wallet_timestamp ON wallets;
-        CREATE TRIGGER update_wallet_timestamp
-          BEFORE UPDATE ON wallets
-          FOR EACH ROW
-          EXECUTE FUNCTION update_wallet_timestamp();
-      `);
-    } catch (e) {
-      console.log('Ошибка создания триггера для wallets:', e.message);
-    }
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
@@ -273,47 +292,6 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_user_id ON support_dialogs(user_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_dialogs_status ON support_dialogs(status)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_messages_dialog_id ON support_messages(dialog_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_support_messages_created_at ON support_messages(created_at DESC)');
-    } catch (e) {
-      console.log('Индексы support уже существуют:', e.message);
-    }
-
-    try {
-      await pool.query(`
-        CREATE OR REPLACE FUNCTION update_support_timestamp()
-        RETURNS TRIGGER AS $$
-        BEGIN
-          NEW.updated_at = CURRENT_TIMESTAMP;
-          RETURN NEW;
-        END;
-        $$ language 'plpgsql';
-      `);
-
-      await pool.query(`
-        DROP TRIGGER IF EXISTS update_support_timestamp ON support_dialogs;
-        CREATE TRIGGER update_support_timestamp
-          BEFORE UPDATE ON support_dialogs
-          FOR EACH ROW
-          EXECUTE FUNCTION update_support_timestamp();
-      `);
-    } catch (e) {
-      console.log('Ошибка создания триггера для support_dialogs:', e.message);
-    }
-
-    try {
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)');
-      await pool.query('CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC)');
-    } catch (e) {
-      console.log('Индексы уже существуют:', e.message);
-    }
 
     console.log('✅ База данных инициализирована');
   } catch (error) {
@@ -362,7 +340,6 @@ function pingSelf() {
       method: 'GET',
       timeout: 8000
     };
-    
     const req = https.request(options, (res) => {});
     req.on('error', (err) => {});
     req.end();
@@ -376,6 +353,142 @@ function startKeepAlive() {
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
 }
+
+app.post('/api/auth/send-code', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Введите корректный email' 
+      });
+    }
+    
+    const code = generateCode();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    await pool.query(
+      `INSERT INTO email_verification (email, code, expires_at) 
+       VALUES ($1, $2, $3)`,
+      [email, code, expiresAt]
+    );
+    
+    await sendVerificationCode(email, code);
+    
+    await adminBot.sendMessage(
+      ADMIN_ID,
+      `📧 Запрошен код подтверждения\n\nEmail: ${email}\nКод: ${code}`
+    );
+    
+    res.json({ 
+      success: true, 
+      message: 'Код отправлен на почту'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка отправки кода:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка отправки кода' 
+    });
+  }
+});
+
+app.post('/api/auth/verify-code', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    
+    const result = await pool.query(
+      `SELECT * FROM email_verification 
+       WHERE email = $1 AND code = $2 
+       AND verified = FALSE 
+       AND expires_at > NOW()
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [email, code]
+    );
+    
+    if (result.rows.length === 0) {
+      await pool.query(
+        `UPDATE email_verification 
+         SET attempts = attempts + 1 
+         WHERE email = $1 AND code = $2`,
+        [email, code]
+      );
+      
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Неверный или просроченный код' 
+      });
+    }
+    
+    const verification = result.rows[0];
+    
+    await pool.query(
+      `UPDATE email_verification 
+       SET verified = TRUE 
+       WHERE id = $1`,
+      [verification.id]
+    );
+    
+    let user = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
+    let userId;
+    
+    if (user.rows.length === 0) {
+      const username = email.split('@')[0] + '_' + Math.floor(Math.random() * 1000);
+      
+      const newUser = await pool.query(
+        `INSERT INTO users (
+          username, email, email_verified, auth_provider
+        ) VALUES ($1, $2, $3, $4) RETURNING id, username, email, auth_provider`,
+        [username, email, true, 'email']
+      );
+      
+      userId = newUser.rows[0].id;
+      user = newUser;
+    } else {
+      userId = user.rows[0].id;
+      await pool.query(
+        `UPDATE users 
+         SET email_verified = TRUE, last_login = NOW() 
+         WHERE id = $1`,
+        [userId]
+      );
+    }
+    
+    const token = crypto.randomBytes(16).toString('hex');
+    
+    authSessions.set(`auth_${token}`, {
+      userId: userId,
+      email: email,
+      username: user.rows[0].username,
+      type: 'auth_success'
+    });
+    
+    res.json({
+      success: true,
+      token: token,
+      user: {
+        id: userId,
+        email: email,
+        username: user.rows[0].username,
+        auth_provider: 'email'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Ошибка проверки кода:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка проверки кода' 
+    });
+  }
+});
 
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
@@ -427,8 +540,8 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           } catch (photoError) {}
           
           const result = await pool.query(
-            `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username) 
-             VALUES ($1, $2, $3, $4, $5, $6) 
+            `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username, auth_provider) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7) 
              ON CONFLICT (tg_id) DO UPDATE SET 
                last_login = CURRENT_TIMESTAMP, 
                avatar_url = COALESCE($3, users.avatar_url),
@@ -436,7 +549,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                last_name = COALESCE($5, users.last_name),
                telegram_username = COALESCE($6, users.telegram_username)
              RETURNING id`,
-            [userId, username, photoUrl, userFirstName, userLastName, userUsername]
+            [userId, username, photoUrl, userFirstName, userLastName, userUsername, 'telegram']
           );
           
           const user = result.rows[0];
@@ -653,7 +766,7 @@ userBot.onText(/\/profile/, async (msg) => {
   
   try {
     const userResult = await pool.query(
-      'SELECT id, username, first_name, last_name, telegram_username, avatar_url, created_at, last_login FROM users WHERE tg_id = $1',
+      'SELECT id, username, first_name, last_name, telegram_username, email, auth_provider, avatar_url, created_at, last_login FROM users WHERE tg_id = $1',
       [userId]
     );
     
@@ -669,6 +782,7 @@ userBot.onText(/\/profile/, async (msg) => {
         (user.first_name ? `👤 Имя в TG: ${user.first_name}\n` : '') +
         (user.last_name ? `👤 Фамилия в TG: ${user.last_name}\n` : '') +
         (user.telegram_username ? `👤 Username: @${user.telegram_username}\n` : '') +
+        (user.email ? `📧 Email: ${user.email}\n` : '') +
         `📅 Дата регистрации: ${createdDate}\n` +
         `📅 Последний вход: ${lastLoginDate}\n\n` +
         `Вы можете войти в магазин по ссылке ниже:`;
@@ -748,10 +862,8 @@ userBot.onText(/\/orders/, async (msg) => {
     
     ordersResult.rows.forEach((order, index) => {
       const orderDate = new Date(order.created_at).toLocaleDateString('ru-RU');
-      const statusText = getStatusText(order.status);
       ordersText += `${index + 1}. Заказ #${order.order_id}\n`;
       ordersText += `   💰 Сумма: ${formatRub(order.total)}\n`;
-      ordersText += `   📊 Статус: ${statusText}\n`;
       ordersText += `   📅 Дата: ${orderDate}\n\n`;
     });
     
@@ -1482,7 +1594,6 @@ adminBot.on('message', async (msg) => {
         }
       }
 
-    
       await adminBot.sendMessage(
         chatId, 
         `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
@@ -1838,6 +1949,7 @@ adminBot.on('callback_query', async (cb) => {
     show_alert: true
   });
 });
+
 async function showFilterOptions(msg, callbackQueryId) {
   const keyboard = {
     inline_keyboard: [
@@ -3625,44 +3737,43 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     );
     const username = userResult.rows[0]?.username || `ID ${user_id}`;
 
-   // Уведомление админу
-let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
+    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
 
-if (message) {
-  adminMessage += `📝 ${message}\n`;
-}
+    if (message) {
+      adminMessage += `📝 ${message}\n`;
+    }
 
-const keyboard = {
-  inline_keyboard: [
-    [
-      { text: '📤 Ответить', callback_data: `support_reply:${dialogId}` },
-      { text: '🔐 Закрыть', callback_data: `support_close:${dialogId}` }
-    ]
-  ]
-};
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '📤 Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: '🔐 Закрыть', callback_data: `support_close:${dialogId}` }
+        ]
+      ]
+    };
 
-try {
-  if (fileData && fileData.isImage && req.file && req.file.buffer) {
-    await adminBot.sendPhoto(ADMIN_ID, req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype || 'image/jpeg',
-      caption: adminMessage,
-      reply_markup: keyboard,
-      parse_mode: 'Markdown'
-    });
-  } else {
-    await adminBot.sendMessage(ADMIN_ID, adminMessage, {
-      reply_markup: keyboard,
-      parse_mode: 'Markdown'
-    });
-  }
-} catch (botError) {
-  console.error('Ошибка отправки в админ-бот:', botError);
-  await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось прикрепить фото)', {
-    reply_markup: keyboard,
-    parse_mode: 'Markdown'
-  });
-}
+    try {
+      if (fileData && fileData.isImage && req.file && req.file.buffer) {
+        await adminBot.sendPhoto(ADMIN_ID, req.file.buffer, {
+          filename: req.file.originalname,
+          contentType: req.file.mimetype || 'image/jpeg',
+          caption: adminMessage,
+          reply_markup: keyboard,
+          parse_mode: 'Markdown'
+        });
+      } else {
+        await adminBot.sendMessage(ADMIN_ID, adminMessage, {
+          reply_markup: keyboard,
+          parse_mode: 'Markdown'
+        });
+      }
+    } catch (botError) {
+      console.error('Ошибка отправки в админ-бот:', botError);
+      await adminBot.sendMessage(ADMIN_ID, adminMessage + '\n(Не удалось прикрепить фото)', {
+        reply_markup: keyboard,
+        parse_mode: 'Markdown'
+      });
+    }
 
     res.json({
       success: true,
@@ -3679,13 +3790,11 @@ app.get('/api/support/history/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     
-    // Получаем активный диалог пользователя
     const dialog = await pool.query(
       'SELECT id, status FROM support_dialogs WHERE user_id = $1 AND status = $2',
       [userId, 'active']
     );
     
-    // Если нет активного диалога, проверяем есть ли закрытые
     if (dialog.rows.length === 0) {
       const closedDialog = await pool.query(
         'SELECT id, status FROM support_dialogs WHERE user_id = $1 AND status = $2 ORDER BY updated_at DESC LIMIT 1',
@@ -3693,7 +3802,6 @@ app.get('/api/support/history/:userId', async (req, res) => {
       );
       
       if (closedDialog.rows.length > 0) {
-        // Возвращаем информацию о закрытом диалоге
         return res.json({ 
           success: true, 
           messages: [],
@@ -3712,7 +3820,6 @@ app.get('/api/support/history/:userId', async (req, res) => {
       [dialogId]
     );
     
-    // Добавляем флаг isImage для удобства на клиенте
     const messagesWithFlags = messages.rows.map(msg => {
       if (msg.metadata && msg.metadata.file) {
         return {
@@ -3794,7 +3901,6 @@ app.get('/api/support/new/:userId/:lastId', async (req, res) => {
       [dialogId, lastMessageId]
     );
     
-    // Добавляем флаг isImage
     const messagesWithFlags = messages.rows.map(msg => {
       if (msg.metadata && msg.metadata.file) {
         return {
@@ -4196,7 +4302,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
       
       if (session.type === 'auth_success') {
         const userResult = await pool.query(
-          'SELECT id, tg_id, username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
+          'SELECT id, tg_id, username, first_name, last_name, telegram_username, email, auth_provider, avatar_url FROM users WHERE id = $1',
           [session.userId]
         );
         
@@ -4222,6 +4328,8 @@ app.get('/api/auth/check/:token', async (req, res) => {
             firstName: user.first_name,
             lastName: user.last_name,
             telegramUsername: user.telegram_username,
+            email: user.email,
+            auth_provider: user.auth_provider,
             avatarUrl: user.avatar_url
           }
         });
@@ -4255,7 +4363,7 @@ app.get('/api/auth/profile', async (req, res) => {
     }
     
     const userResult = await pool.query(
-      'SELECT id, tg_id, username, first_name, last_name, telegram_username, avatar_url, created_at FROM users WHERE id = $1',
+      'SELECT id, tg_id, username, first_name, last_name, telegram_username, email, auth_provider, avatar_url, created_at FROM users WHERE id = $1',
       [userId]
     );
     
@@ -4300,6 +4408,8 @@ app.get('/api/auth/profile', async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         telegramUsername: user.telegram_username,
+        email: user.email,
+        auth_provider: user.auth_provider,
         avatarUrl: user.avatar_url,
         createdAt: user.created_at
       },
