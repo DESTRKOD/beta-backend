@@ -508,6 +508,48 @@ app.post('/api/auth/send-code', async (req, res) => {
   }
 });
 
+// API для отправки кода на email
+app.post('/api/auth/send-code', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Введите корректный email' 
+      });
+    }
+    
+    const code = generateCode();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    await pool.query(
+      `INSERT INTO email_verification (email, code, expires_at) 
+       VALUES ($1, $2, $3)`,
+      [email, code, expiresAt]
+    );
+    
+    await sendVerificationCode(email, code);
+    
+    await adminBot.sendMessage(
+      ADMIN_ID,
+      `📧 Запрошен код подтверждения\n\nEmail: ${email}\nКод: ${code}`
+    );
+    
+    res.json({ 
+      success: true, 
+      message: 'Код отправлен на почту'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка отправки кода:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка отправки кода' 
+    });
+  }
+});
+
 app.post('/api/auth/verify-code', async (req, res) => {
   try {
     const { email, code } = req.body;
