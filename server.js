@@ -275,7 +275,8 @@ async function initDB() {
     const columnsToAdd = [
       { name: 'email', type: 'VARCHAR(255) UNIQUE' },
       { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
-      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' }
+      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' },
+      { name: 'yandex_id', type: 'VARCHAR(100) UNIQUE' }
     ];
     
     for (const column of columnsToAdd) {
