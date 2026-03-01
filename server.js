@@ -10,7 +10,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 const cors = require('cors');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,13 +24,6 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const SERVER_URL = process.env.SERVER_URL;
 const SITE_URL = process.env.SITE_URL;
 
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.mail.ru';
-const SMTP_PORT = process.env.SMTP_PORT || 465;
-const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
-
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -40,21 +32,20 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-// Настройка сессий для Passport
+
 app.use(session({
   secret: process.env.SESSION_SECRET || 'duck-shop-secret-key-2024',
   resave: false,
   saveUninitialized: false,
   cookie: {
     secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000 // 24 часа
+    maxAge: 24 * 60 * 60 * 1000
   }
 }));
 
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Сериализация пользователя
 passport.serializeUser((user, done) => {
   done(null, user.id);
 });
@@ -68,7 +59,6 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
-// Yandex OAuth через OAuth2
 passport.use('yandex', new OAuth2Strategy({
     authorizationURL: 'https://oauth.yandex.ru/authorize',
     tokenURL: 'https://oauth.yandex.ru/token',
@@ -78,21 +68,18 @@ passport.use('yandex', new OAuth2Strategy({
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
-      // Получаем данные пользователя через API Яндекса
       const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
         params: { format: 'json', oauth_token: accessToken }
       });
       
       const yandexProfile = userInfoResponse.data;
       
-      // Ищем пользователя
       let user = await pool.query(
         'SELECT * FROM users WHERE yandex_id = $1 OR email = $2',
         [yandexProfile.id, yandexProfile.default_email]
       );
       
       if (user.rows.length === 0) {
-        // Создаем нового
         const username = yandexProfile.display_name || 
                         `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
                         `User_${Date.now()}`;
@@ -128,7 +115,6 @@ passport.use('yandex', new OAuth2Strategy({
   }
 ));
 
-// Yandex OAuth endpoints
 app.get('/api/auth/yandex', passport.authenticate('yandex'));
 
 app.get('/api/auth/yandex/callback',
@@ -136,7 +122,6 @@ app.get('/api/auth/yandex/callback',
     failureRedirect: `${SITE_URL}/reg_log.html?error=yandex_failed` 
   }),
   (req, res) => {
-    // Генерируем токен как в Telegram авторизации
     const token = crypto.randomBytes(16).toString('hex');
     
     authSessions.set(`auth_${token}`, {
@@ -155,16 +140,6 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: true,
     sslmode: 'require'
-  }
-});
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_SECURE,
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS
   }
 });
 
@@ -195,32 +170,6 @@ try {
 } catch (error) {
   console.error('❌ Ошибка инициализации ботов:', error);
   process.exit(1);
-}
-
-function generateCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-async function sendVerificationCode(email, code) {
-  const mailOptions = {
-    from: SMTP_FROM,
-    to: email,
-    subject: 'Код подтверждения - Duck Shop',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto;">
-        <h2 style="color: #0b3c91;">Подтверждение входа</h2>
-        <p>Ваш код для входа в Duck Shop:</p>
-        <div style="font-size: 32px; font-weight: bold; color: #1565c0; margin: 20px 0; padding: 20px; background: #f0f4ff; border-radius: 10px; text-align: center;">
-          ${code}
-        </div>
-        <p>Код действителен 10 минут.</p>
-        <p>Если вы не запрашивали код, просто проигнорируйте это письмо.</p>
-        <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
-        <p style="color: #666; font-size: 12px;">Duck Shop - магазин игровых ценностей</p>
-      </div>
-    `
-  };
-  await transporter.sendMail(mailOptions);
 }
 
 async function generateSignature(data, password) {
@@ -289,18 +238,6 @@ async function initDB() {
         console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
       }
     }
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS email_verification (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        code VARCHAR(6) NOT NULL,
-        attempts INTEGER DEFAULT 0,
-        verified BOOLEAN DEFAULT FALSE,
-        expires_at TIMESTAMP NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
@@ -466,184 +403,6 @@ function startKeepAlive() {
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
 }
-
-app.post('/api/auth/send-code', async (req, res) => {
-  try {
-    const { email } = req.body;
-    
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Введите корректный email' 
-      });
-    }
-    
-    const code = generateCode();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
-    await pool.query(
-      `INSERT INTO email_verification (email, code, expires_at) 
-       VALUES ($1, $2, $3)`,
-      [email, code, expiresAt]
-    );
-    
-    await sendVerificationCode(email, code);
-    
-    await adminBot.sendMessage(
-      ADMIN_ID,
-      `📧 Запрошен код подтверждения\n\nEmail: ${email}\nКод: ${code}`
-    );
-    
-    res.json({ 
-      success: true, 
-      message: 'Код отправлен на почту'
-    });
-    
-  } catch (error) {
-    console.error('Ошибка отправки кода:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Ошибка отправки кода' 
-    });
-  }
-});
-
-// API для отправки кода на email
-app.post('/api/auth/send-code', async (req, res) => {
-  try {
-    const { email } = req.body;
-    
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Введите корректный email' 
-      });
-    }
-    
-    const code = generateCode();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
-    await pool.query(
-      `INSERT INTO email_verification (email, code, expires_at) 
-       VALUES ($1, $2, $3)`,
-      [email, code, expiresAt]
-    );
-    
-    await sendVerificationCode(email, code);
-    
-    await adminBot.sendMessage(
-      ADMIN_ID,
-      `📧 Запрошен код подтверждения\n\nEmail: ${email}\nКод: ${code}`
-    );
-    
-    res.json({ 
-      success: true, 
-      message: 'Код отправлен на почту'
-    });
-    
-  } catch (error) {
-    console.error('Ошибка отправки кода:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Ошибка отправки кода' 
-    });
-  }
-});
-
-app.post('/api/auth/verify-code', async (req, res) => {
-  try {
-    const { email, code } = req.body;
-    
-    const result = await pool.query(
-      `SELECT * FROM email_verification 
-       WHERE email = $1 AND code = $2 
-       AND verified = FALSE 
-       AND expires_at > NOW()
-       ORDER BY created_at DESC 
-       LIMIT 1`,
-      [email, code]
-    );
-    
-    if (result.rows.length === 0) {
-      await pool.query(
-        `UPDATE email_verification 
-         SET attempts = attempts + 1 
-         WHERE email = $1 AND code = $2`,
-        [email, code]
-      );
-      
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Неверный или просроченный код' 
-      });
-    }
-    
-    const verification = result.rows[0];
-    
-    await pool.query(
-      `UPDATE email_verification 
-       SET verified = TRUE 
-       WHERE id = $1`,
-      [verification.id]
-    );
-    
-    let user = await pool.query(
-      'SELECT * FROM users WHERE email = $1',
-      [email]
-    );
-    
-    let userId;
-    
-    if (user.rows.length === 0) {
-      const username = email.split('@')[0] + '_' + Math.floor(Math.random() * 1000);
-      
-      const newUser = await pool.query(
-        `INSERT INTO users (
-          username, email, email_verified, auth_provider
-        ) VALUES ($1, $2, $3, $4) RETURNING id, username, email, auth_provider`,
-        [username, email, true, 'email']
-      );
-      
-      userId = newUser.rows[0].id;
-      user = newUser;
-    } else {
-      userId = user.rows[0].id;
-      await pool.query(
-        `UPDATE users 
-         SET email_verified = TRUE, last_login = NOW() 
-         WHERE id = $1`,
-        [userId]
-      );
-    }
-    
-    const token = crypto.randomBytes(16).toString('hex');
-    
-    authSessions.set(`auth_${token}`, {
-      userId: userId,
-      email: email,
-      username: user.rows[0].username,
-      type: 'auth_success'
-    });
-    
-    res.json({
-      success: true,
-      token: token,
-      user: {
-        id: userId,
-        email: email,
-        username: user.rows[0].username,
-        auth_provider: 'email'
-      }
-    });
-    
-  } catch (error) {
-    console.error('Ошибка проверки кода:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Ошибка проверки кода' 
-    });
-  }
-});
 
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
