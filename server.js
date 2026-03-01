@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const passport = require('passport');
 const session = require('express-session');
-const YandexStrategy = require('passport-yandex').Strategy;
+const OAuth2Strategy = require('passport-oauth2').Strategy;
 const crypto = require('crypto');
 const axios = require('axios');
 const sharp = require('sharp');
@@ -68,24 +68,33 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
-// Yandex OAuth Strategy
-passport.use(new YandexStrategy({
+// Yandex OAuth через OAuth2
+passport.use('yandex', new OAuth2Strategy({
+    authorizationURL: 'https://oauth.yandex.ru/authorize',
+    tokenURL: 'https://oauth.yandex.ru/token',
     clientID: process.env.YANDEX_CLIENT_ID,
     clientSecret: process.env.YANDEX_CLIENT_SECRET,
     callbackURL: `${SERVER_URL}/api/auth/yandex/callback`
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
-      // Ищем пользователя по yandex_id или email
+      // Получаем данные пользователя через API Яндекса
+      const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
+        params: { format: 'json', oauth_token: accessToken }
+      });
+      
+      const yandexProfile = userInfoResponse.data;
+      
+      // Ищем пользователя
       let user = await pool.query(
         'SELECT * FROM users WHERE yandex_id = $1 OR email = $2',
-        [profile.id, profile.emails?.[0]?.value]
+        [yandexProfile.id, yandexProfile.default_email]
       );
       
       if (user.rows.length === 0) {
-        // Создаем нового пользователя
-        const username = profile.displayName || 
-                        `${profile.name?.first_name || ''} ${profile.name?.last_name || ''}`.trim() || 
+        // Создаем нового
+        const username = yandexProfile.display_name || 
+                        `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
                         `User_${Date.now()}`;
         
         const newUser = await pool.query(
@@ -95,21 +104,20 @@ passport.use(new YandexStrategy({
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
           [
             username,
-            profile.emails?.[0]?.value || null,
+            yandexProfile.default_email || null,
             true,
-            profile.id,
+            yandexProfile.id,
             'yandex',
-            profile.name?.first_name || null,
-            profile.name?.last_name || null,
-            profile.photos?.[0]?.value || null
+            yandexProfile.first_name || null,
+            yandexProfile.last_name || null,
+            yandexProfile.default_avatar_id ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` : null
           ]
         );
         user = newUser;
       } else if (!user.rows[0].yandex_id) {
-        // Связываем Яндекс с существующим пользователем
         user = await pool.query(
           'UPDATE users SET yandex_id = $1 WHERE id = $2 RETURNING *',
-          [profile.id, user.rows[0].id]
+          [yandexProfile.id, user.rows[0].id]
         );
       }
       
