@@ -1,5 +1,8 @@
 require('dotenv').config();
 const express = require('express');
+const passport = require('passport');
+const session = require('express-session');
+const YandexStrategy = require('passport-yandex').Strategy;
 const crypto = require('crypto');
 const axios = require('axios');
 const sharp = require('sharp');
@@ -37,6 +40,107 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Настройка сессий для Passport
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'duck-shop-secret-key-2024',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 часа
+  }
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Сериализация пользователя
+passport.serializeUser((user, done) => {
+  done(null, user.id);
+});
+
+passport.deserializeUser(async (id, done) => {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+    done(null, result.rows[0] || null);
+  } catch (error) {
+    done(error, null);
+  }
+});
+
+// Yandex OAuth Strategy
+passport.use(new YandexStrategy({
+    clientID: process.env.YANDEX_CLIENT_ID,
+    clientSecret: process.env.YANDEX_CLIENT_SECRET,
+    callbackURL: `${SERVER_URL}/api/auth/yandex/callback`
+  },
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+      // Ищем пользователя по yandex_id или email
+      let user = await pool.query(
+        'SELECT * FROM users WHERE yandex_id = $1 OR email = $2',
+        [profile.id, profile.emails?.[0]?.value]
+      );
+      
+      if (user.rows.length === 0) {
+        // Создаем нового пользователя
+        const username = profile.displayName || 
+                        `${profile.name?.first_name || ''} ${profile.name?.last_name || ''}`.trim() || 
+                        `User_${Date.now()}`;
+        
+        const newUser = await pool.query(
+          `INSERT INTO users (
+            username, email, email_verified, yandex_id, auth_provider,
+            first_name, last_name, avatar_url
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [
+            username,
+            profile.emails?.[0]?.value || null,
+            true,
+            profile.id,
+            'yandex',
+            profile.name?.first_name || null,
+            profile.name?.last_name || null,
+            profile.photos?.[0]?.value || null
+          ]
+        );
+        user = newUser;
+      } else if (!user.rows[0].yandex_id) {
+        // Связываем Яндекс с существующим пользователем
+        user = await pool.query(
+          'UPDATE users SET yandex_id = $1 WHERE id = $2 RETURNING *',
+          [profile.id, user.rows[0].id]
+        );
+      }
+      
+      return done(null, user.rows[0]);
+    } catch (error) {
+      return done(error, null);
+    }
+  }
+));
+
+// Yandex OAuth endpoints
+app.get('/api/auth/yandex', passport.authenticate('yandex'));
+
+app.get('/api/auth/yandex/callback',
+  passport.authenticate('yandex', { 
+    failureRedirect: `${SITE_URL}/reg_log.html?error=yandex_failed` 
+  }),
+  (req, res) => {
+    // Генерируем токен как в Telegram авторизации
+    const token = crypto.randomBytes(16).toString('hex');
+    
+    authSessions.set(`auth_${token}`, {
+      userId: req.user.id,
+      username: req.user.username,
+      email: req.user.email,
+      type: 'auth_success'
+    });
+    
+    res.redirect(`${SITE_URL}/main.html?auth=${token}`);
+  }
+);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
