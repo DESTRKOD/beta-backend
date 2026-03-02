@@ -84,11 +84,36 @@ passport.use('yandex', new OAuth2Strategy({
                         `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
                         `User_${Date.now()}`;
         
+        passport.use('yandex', new OAuth2Strategy({
+    authorizationURL: 'https://oauth.yandex.ru/authorize',
+    tokenURL: 'https://oauth.yandex.ru/token',
+    clientID: process.env.YANDEX_CLIENT_ID,
+    clientSecret: process.env.YANDEX_CLIENT_SECRET,
+    callbackURL: `${SERVER_URL}/api/auth/yandex/callback`
+  },
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+      const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
+        params: { format: 'json', oauth_token: accessToken }
+      });
+      
+      const yandexProfile = userInfoResponse.data;
+      
+      let user = await pool.query(
+        'SELECT * FROM users WHERE yandex_id = $1 OR email = $2',
+        [yandexProfile.id, yandexProfile.default_email]
+      );
+      
+      if (user.rows.length === 0) {
+        const username = yandexProfile.display_name || 
+                        `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
+                        `User_${Date.now()}`;
+        
         const newUser = await pool.query(
           `INSERT INTO users (
             username, email, email_verified, yandex_id, auth_provider,
-            first_name, last_name, avatar_url
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+            first_name, last_name, avatar_url, tg_id
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
           [
             username,
             yandexProfile.default_email || null,
@@ -97,7 +122,8 @@ passport.use('yandex', new OAuth2Strategy({
             'yandex',
             yandexProfile.first_name || null,
             yandexProfile.last_name || null,
-            yandexProfile.default_avatar_id ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` : null
+            yandexProfile.default_avatar_id ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` : null,
+            null
           ]
         );
         user = newUser;
@@ -114,7 +140,6 @@ passport.use('yandex', new OAuth2Strategy({
     }
   }
 ));
-
 app.get('/api/auth/yandex', passport.authenticate('yandex'));
 
 app.get('/api/auth/yandex/callback',
