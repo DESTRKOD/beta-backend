@@ -238,57 +238,64 @@ const filterStates = {};
 
 async function initDB() {
   try {
-    // Сначала проверяем существующую структуру и удаляем старые колонки если нужно
+    // Сначала добавляем все нужные колонки для Яндекса (если их нет)
+    const columnsToAdd = [
+      { name: 'yandex_id', type: 'VARCHAR(100) UNIQUE' },
+      { name: 'yandex_email', type: 'VARCHAR(255)' },
+      { name: 'yandex_first_name', type: 'VARCHAR(100)' },
+      { name: 'yandex_last_name', type: 'VARCHAR(100)' },
+      { name: 'yandex_display_name', type: 'VARCHAR(100)' },
+      { name: 'yandex_avatar_url', type: 'TEXT' },
+      // Добавляем Telegram колонки если их нет
+      { name: 'telegram_username', type: 'VARCHAR(100)' },
+      { name: 'telegram_first_name', type: 'VARCHAR(100)' },
+      { name: 'telegram_last_name', type: 'VARCHAR(100)' },
+      { name: 'telegram_avatar_url', type: 'TEXT' }
+    ];
+    
+    for (const column of columnsToAdd) {
+      try {
+        await pool.query(`
+          ALTER TABLE users 
+          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
+        `);
+        console.log(`✅ Колонка ${column.name} добавлена или уже существует`);
+      } catch (e) {
+        console.log(`Колонка ${column.name} не может быть добавлена:`, e.message);
+      }
+    }
+
+    // Убеждаемся что auth_provider существует и имеет правильный тип
     try {
       await pool.query(`
         ALTER TABLE users 
-        DROP COLUMN IF EXISTS email,
-        DROP COLUMN IF EXISTS email_verified,
-        DROP COLUMN IF EXISTS auth_provider,
-        DROP COLUMN IF EXISTS yandex_id,
-        DROP COLUMN IF EXISTS first_name,
-        DROP COLUMN IF EXISTS last_name,
-        DROP COLUMN IF EXISTS telegram_username
+        ALTER COLUMN auth_provider TYPE VARCHAR(20),
+        ALTER COLUMN auth_provider SET DEFAULT 'email'
       `);
-      console.log('✅ Старые колонки удалены');
     } catch (e) {
-      console.log('Ошибка при удалении колонок (возможно их нет):', e.message);
+      // Если колонки нет - создаем
+      try {
+        await pool.query(`
+          ALTER TABLE users 
+          ADD COLUMN auth_provider VARCHAR(20) DEFAULT 'email'
+        `);
+      } catch (err) {
+        console.log('Ошибка с auth_provider:', err.message);
+      }
     }
 
-    // Создаем таблицу заново с правильной структурой
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        
-        -- Telegram данные
-        tg_id BIGINT UNIQUE,
-        telegram_username VARCHAR(100),
-        telegram_first_name VARCHAR(100),
-        telegram_last_name VARCHAR(100),
-        telegram_avatar_url TEXT,
-        
-        -- Яндекс данные
-        yandex_id VARCHAR(100) UNIQUE,
-        yandex_email VARCHAR(255),
-        yandex_first_name VARCHAR(100),
-        yandex_last_name VARCHAR(100),
-        yandex_display_name VARCHAR(100),
-        yandex_avatar_url TEXT,
-        
-        -- Общие поля
-        username VARCHAR(100) NOT NULL,
-        email VARCHAR(255),
-        email_verified BOOLEAN DEFAULT FALSE,
-        auth_provider VARCHAR(20) NOT NULL DEFAULT 'email',
-        avatar_url TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    // Проверяем что tg_id может быть NULL
+    try {
+      await pool.query(`
+        ALTER TABLE users ALTER COLUMN tg_id DROP NOT NULL
+      `);
+    } catch (e) {
+      console.log('tg_id уже может быть NULL или ошибка:', e.message);
+    }
 
-    console.log('✅ Таблица users создана с раздельными полями');
+    console.log('✅ Таблица users обновлена');
 
-    // Создаем остальные таблицы
+    // Остальные таблицы оставляем как есть
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -301,14 +308,30 @@ async function initDB() {
         payment_id INTEGER,
         payment_status VARCHAR(20) DEFAULT 'pending',
         status VARCHAR(20) DEFAULT 'new',
-        code_requested BOOLEAN DEFAULT FALSE,
-        wrong_code_attempts INTEGER DEFAULT 0,
-        refund_amount INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
+    // Добавляем недостающие колонки в orders
+    const ordersColumnsToAdd = [
+      { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
+      { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
+      { name: 'refund_amount', type: 'INTEGER' }
+    ];
+    
+    for (const column of ordersColumnsToAdd) {
+      try {
+        await pool.query(`
+          ALTER TABLE orders 
+          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
+        `);
+      } catch (e) {
+        console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
+      }
+    }
+
+    // Создаем остальные таблицы если их нет
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
@@ -378,7 +401,7 @@ async function initDB() {
       )
     `);
 
-    console.log('✅ Все таблицы созданы');
+    console.log('✅ База данных инициализирована');
     
   } catch (error) {
     console.error('❌ Ошибка инициализации БД:', error);
