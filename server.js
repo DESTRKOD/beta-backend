@@ -242,14 +242,14 @@ async function initDB() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        -- Telegram данные (только для тех, кто через Telegram)
+        -- Telegram данные
         tg_id BIGINT UNIQUE,
         telegram_username VARCHAR(100),
         telegram_first_name VARCHAR(100),
         telegram_last_name VARCHAR(100),
         telegram_avatar_url TEXT,
         
-        -- Яндекс данные (только для тех, кто через Яндекс)
+        -- Яндекс данные
         yandex_id VARCHAR(100) UNIQUE,
         yandex_email VARCHAR(255),
         yandex_first_name VARCHAR(100),
@@ -261,7 +261,7 @@ async function initDB() {
         username VARCHAR(100) NOT NULL,
         email VARCHAR(255),
         email_verified BOOLEAN DEFAULT FALSE,
-        auth_provider VARCHAR(20) NOT NULL, -- 'telegram', 'yandex', 'email'
+        auth_provider VARCHAR(20) NOT NULL,
         avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -269,9 +269,8 @@ async function initDB() {
     `);
 
     console.log('✅ Таблица users создана с раздельными полями');
-  }
-}
 
+    // Добавляем остальные колонки (если нужно)
     const columnsToAdd = [
       { name: 'email', type: 'VARCHAR(255) UNIQUE' },
       { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
