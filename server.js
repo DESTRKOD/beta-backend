@@ -238,10 +238,28 @@ const filterStates = {};
 
 async function initDB() {
   try {
-    // Правильная структура таблицы users
+    // Сначала проверяем существующую структуру и удаляем старые колонки если нужно
+    try {
+      await pool.query(`
+        ALTER TABLE users 
+        DROP COLUMN IF EXISTS email,
+        DROP COLUMN IF EXISTS email_verified,
+        DROP COLUMN IF EXISTS auth_provider,
+        DROP COLUMN IF EXISTS yandex_id,
+        DROP COLUMN IF EXISTS first_name,
+        DROP COLUMN IF EXISTS last_name,
+        DROP COLUMN IF EXISTS telegram_username
+      `);
+      console.log('✅ Старые колонки удалены');
+    } catch (e) {
+      console.log('Ошибка при удалении колонок (возможно их нет):', e.message);
+    }
+
+    // Создаем таблицу заново с правильной структурой
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
+        
         -- Telegram данные
         tg_id BIGINT UNIQUE,
         telegram_username VARCHAR(100),
@@ -261,7 +279,7 @@ async function initDB() {
         username VARCHAR(100) NOT NULL,
         email VARCHAR(255),
         email_verified BOOLEAN DEFAULT FALSE,
-        auth_provider VARCHAR(20) NOT NULL,
+        auth_provider VARCHAR(20) NOT NULL DEFAULT 'email',
         avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -270,25 +288,7 @@ async function initDB() {
 
     console.log('✅ Таблица users создана с раздельными полями');
 
-    // Добавляем остальные колонки (если нужно)
-    const columnsToAdd = [
-      { name: 'email', type: 'VARCHAR(255) UNIQUE' },
-      { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
-      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' },
-      { name: 'yandex_id', type: 'VARCHAR(100) UNIQUE' }
-    ];
-    
-    for (const column of columnsToAdd) {
-      try {
-        await pool.query(`
-          ALTER TABLE users 
-          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
-        `);
-      } catch (e) {
-        console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
-      }
-    }
-
+    // Создаем остальные таблицы
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -301,28 +301,13 @@ async function initDB() {
         payment_id INTEGER,
         payment_status VARCHAR(20) DEFAULT 'pending',
         status VARCHAR(20) DEFAULT 'new',
+        code_requested BOOLEAN DEFAULT FALSE,
+        wrong_code_attempts INTEGER DEFAULT 0,
+        refund_amount INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    const ordersColumnsToAdd = [
-      { name: 'code_requested', type: 'BOOLEAN DEFAULT FALSE' },
-      { name: 'wrong_code_attempts', type: 'INTEGER DEFAULT 0' },
-      { name: 'user_id', type: 'INTEGER REFERENCES users(id) ON DELETE SET NULL' },
-      { name: 'refund_amount', type: 'INTEGER' }
-    ];
-    
-    for (const column of ordersColumnsToAdd) {
-      try {
-        await pool.query(`
-          ALTER TABLE orders 
-          ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}
-        `);
-      } catch (e) {
-        console.log(`Колонка ${column.name} уже существует или ошибка:`, e.message);
-      }
-    }
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
@@ -393,7 +378,8 @@ async function initDB() {
       )
     `);
 
-    console.log('✅ База данных инициализирована');
+    console.log('✅ Все таблицы созданы');
+    
   } catch (error) {
     console.error('❌ Ошибка инициализации БД:', error);
     throw error;
