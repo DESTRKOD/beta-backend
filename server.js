@@ -74,43 +74,77 @@ passport.use('yandex', new OAuth2Strategy({
       
       const yandexProfile = userInfoResponse.data;
       
+      // Ищем только по yandex_id или email
       let user = await pool.query(
-        'SELECT * FROM users WHERE yandex_id = $1 OR email = $2',
+        'SELECT * FROM users WHERE yandex_id = $1 OR yandex_email = $2',
         [yandexProfile.id, yandexProfile.default_email]
       );
       
       if (user.rows.length === 0) {
+        // Новый пользователь через Яндекс
         const username = yandexProfile.display_name || 
                         `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
-                        `User_${Date.now()}`;
+                        `Yandex_User_${Date.now()}`;
+        
+        const avatarUrl = yandexProfile.default_avatar_id 
+          ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
+          : null;
         
         const newUser = await pool.query(
           `INSERT INTO users (
-            username, email, email_verified, yandex_id, auth_provider,
-            first_name, last_name, avatar_url, tg_id
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            username,
+            email,
+            email_verified,
+            auth_provider,
+            -- Яндекс-специфичные поля
+            yandex_id,
+            yandex_email,
+            yandex_first_name,
+            yandex_last_name,
+            yandex_display_name,
+            yandex_avatar_url,
+            -- Общее поле для аватарки
+            avatar_url
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
           [
             username,
             yandexProfile.default_email || null,
             true,
-            yandexProfile.id,
             'yandex',
+            yandexProfile.id,
+            yandexProfile.default_email || null,
             yandexProfile.first_name || null,
             yandexProfile.last_name || null,
-            yandexProfile.default_avatar_id ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` : null,
-            null
+            yandexProfile.display_name || null,
+            avatarUrl,
+            avatarUrl
           ]
         );
         user = newUser;
-      } else if (!user.rows[0].yandex_id) {
+      } else {
+        // Обновляем данные Яндекса
         user = await pool.query(
-          'UPDATE users SET yandex_id = $1 WHERE id = $2 RETURNING *',
-          [yandexProfile.id, user.rows[0].id]
+          `UPDATE users SET 
+            last_login = CURRENT_TIMESTAMP,
+            yandex_first_name = COALESCE($1, yandex_first_name),
+            yandex_last_name = COALESCE($2, yandex_last_name),
+            yandex_display_name = COALESCE($3, yandex_display_name),
+            yandex_avatar_url = COALESCE($4, yandex_avatar_url),
+            avatar_url = COALESCE($4, avatar_url)
+           WHERE id = $5 RETURNING *`,
+          [
+            yandexProfile.first_name || null,
+            yandexProfile.last_name || null,
+            yandexProfile.display_name || null,
+            avatarUrl,
+            user.rows[0].id
+          ]
         );
       }
       
       return done(null, user.rows[0]);
     } catch (error) {
+      console.error('❌ Ошибка Яндекс авторизации:', error);
       return done(error, null);
     }
   }
@@ -204,22 +238,39 @@ const filterStates = {};
 
 async function initDB() {
   try {
+    // Правильная структура таблицы users
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
+        -- Telegram данные (только для тех, кто через Telegram)
         tg_id BIGINT UNIQUE,
-        username VARCHAR(100) NOT NULL,
-        first_name VARCHAR(100),
-        last_name VARCHAR(100),
         telegram_username VARCHAR(100),
-        email VARCHAR(255) UNIQUE,
+        telegram_first_name VARCHAR(100),
+        telegram_last_name VARCHAR(100),
+        telegram_avatar_url TEXT,
+        
+        -- Яндекс данные (только для тех, кто через Яндекс)
+        yandex_id VARCHAR(100) UNIQUE,
+        yandex_email VARCHAR(255),
+        yandex_first_name VARCHAR(100),
+        yandex_last_name VARCHAR(100),
+        yandex_display_name VARCHAR(100),
+        yandex_avatar_url TEXT,
+        
+        -- Общие поля
+        username VARCHAR(100) NOT NULL,
+        email VARCHAR(255),
         email_verified BOOLEAN DEFAULT FALSE,
-        auth_provider VARCHAR(20) DEFAULT 'email',
+        auth_provider VARCHAR(20) NOT NULL, -- 'telegram', 'yandex', 'email'
         avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    console.log('✅ Таблица users создана с раздельными полями');
+  }
+}
 
     const columnsToAdd = [
       { name: 'email', type: 'VARCHAR(255) UNIQUE' },
