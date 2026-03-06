@@ -3824,9 +3824,9 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing user ID' });
     }
     
-    // Получаем текущего пользователя
+    // Получаем текущего пользователя с его Telegram данными
     const userResult = await pool.query(
-      'SELECT auth_provider FROM users WHERE id = $1',
+      'SELECT id, username, tg_id, telegram_username, auth_provider FROM users WHERE id = $1',
       [userId]
     );
     
@@ -3834,19 +3834,23 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
     
-    const currentProvider = userResult.rows[0].auth_provider;
+    const user = userResult.rows[0];
+    const currentProvider = user.auth_provider;
+    const oldTgId = user.tg_id;
+    const oldTgUsername = user.telegram_username;
+    
+    // Проверяем, можно ли отвязать Telegram
+    if (currentProvider === 'telegram') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Cannot unlink Telegram from Telegram-only account' 
+      });
+    }
     
     // Определяем новый провайдер
     let newProvider = 'yandex';
     if (currentProvider === 'yandex+telegram') {
       newProvider = 'yandex';
-    } else if (currentProvider === 'telegram') {
-      // Если это чисто Telegram аккаунт, можно сделать его email или удалить?
-      // Лучше запретить отвязку для чисто Telegram аккаунтов
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Cannot unlink Telegram from Telegram-only account' 
-      });
     }
     
     // Обновляем пользователя - убираем все Telegram данные
@@ -3868,13 +3872,57 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       [userId]
     );
     
-    const user = userWithAvatar.rows[0];
-    if (user.avatar_url === user.telegram_avatar_url) {
+    const userAvatar = userWithAvatar.rows[0];
+    if (userAvatar.avatar_url === userAvatar.telegram_avatar_url) {
       await pool.query(
         'UPDATE users SET avatar_url = NULL WHERE id = $1',
         [userId]
       );
     }
+    
+    // ===== ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ В TELEGRAM =====
+    if (oldTgId) {
+      try {
+        const keyboard = {
+          inline_keyboard: [[
+            { 
+              text: '🔄 Привязать снова', 
+              url: `${SITE_URL}/profile.html` 
+            }
+          ]]
+        };
+        
+        await userBot.sendMessage(
+          oldTgId,
+          `🔓 *Telegram отвязан от аккаунта*\n\n` +
+          `Ваш Telegram аккаунт${oldTgUsername ? ` (@${oldTgUsername})` : ''} был отвязан от профиля в Duck Shop.\n\n` +
+          `📌 *Что изменилось:*\n` +
+          `• Вы больше не можете входить через Telegram\n` +
+          `• Уведомления о заказах больше не будут приходить сюда\n` +
+          `• Ваш аккаунт в магазине сохранен (вход через Яндекс)\n\n` +
+          `💡 *Хотите привязать снова?*\n` +
+          `Зайдите в профиль на сайте и нажмите "Привязать Telegram"`,
+          { 
+            parse_mode: 'Markdown',
+            reply_markup: keyboard 
+          }
+        );
+        
+        console.log(`📤 Уведомление об отвязке отправлено пользователю ${oldTgId}`);
+      } catch (notifyError) {
+        console.error('❌ Ошибка отправки уведомления об отвязке:', notifyError);
+      }
+    }
+    
+    // Уведомление админу (опционально)
+    try {
+      await adminBot.sendMessage(
+        ADMIN_ID,
+        `👤 *Telegram отвязан*\n\n` +
+        `Пользователь *${user.username || 'ID ' + userId}* (ID: ${userId}) отвязал Telegram аккаунт${oldTgUsername ? ` @${oldTgUsername}` : ''}.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (adminError) {}
     
     res.json({ 
       success: true,
@@ -3882,7 +3930,7 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Ошибка отвязки Telegram:', error);
+    console.error('❌ Ошибка отвязки Telegram:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
