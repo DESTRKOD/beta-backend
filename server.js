@@ -229,7 +229,7 @@ app.get('/api/auth/yandex/callback',
           type: 'auth_success'
         });
         
-        return res.redirect(`${SITE_URL}/main.html?auth=${token}`);
+        return res.redirect(`${SITE_URL}/index.html?auth=${token}`);
       });
     })(req, res, next);
   }
@@ -678,7 +678,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             inline_keyboard: [[
               { 
                 text: '✅ Перейти в магазин', 
-                url: `${SITE_URL}/main.html?auth=${token}` 
+                url: `${SITE_URL}/index.html?auth=${token}` 
               }
             ]]
           };
@@ -766,7 +766,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               inline_keyboard: [[
                 { 
                   text: '✅ Перейти в магазин', 
-                  url: `${SITE_URL}/main.html?auth=${token}` 
+                  url: `${SITE_URL}/index.html?auth=${token}` 
                 }
               ]]
             };
@@ -6089,7 +6089,7 @@ app.post('/api/create-order', async (req, res) => {
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
       success_url: `${SITE_URL}/success.html?order=${orderId}`,
-      fail_url: `${SITE_URL}/main.html?payment=fail&order=${orderId}`,
+      fail_url: `${SITE_URL}/index.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     };
     
