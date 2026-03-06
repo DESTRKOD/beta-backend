@@ -68,6 +68,12 @@ passport.use('yandex', new OAuth2Strategy({
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
+      // Проверяем, что pool инициализирован
+      if (!pool) {
+        console.error('❌ Database pool is not initialized');
+        return done(new Error('Database connection error'), null);
+      }
+
       const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
         params: { format: 'json', oauth_token: accessToken }
       });
@@ -96,14 +102,12 @@ passport.use('yandex', new OAuth2Strategy({
             email,
             email_verified,
             auth_provider,
-            -- Яндекс-специфичные поля
             yandex_id,
             yandex_email,
             yandex_first_name,
             yandex_last_name,
             yandex_display_name,
             yandex_avatar_url,
-            -- Общее поле для аватарки
             avatar_url
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
           [
@@ -123,6 +127,10 @@ passport.use('yandex', new OAuth2Strategy({
         user = newUser;
       } else {
         // Обновляем данные Яндекса
+        const avatarUrl = yandexProfile.default_avatar_id 
+          ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
+          : null;
+          
         user = await pool.query(
           `UPDATE users SET 
             last_login = CURRENT_TIMESTAMP,
@@ -149,7 +157,38 @@ passport.use('yandex', new OAuth2Strategy({
     }
   }
 ));
-app.get('/api/auth/yandex', passport.authenticate('yandex'));
+app.get('/api/auth/yandex', passport.authenticate('yandex'));\
+
+app.get('/api/auth/yandex/callback',
+  (req, res, next) => {
+    passport.authenticate('yandex', (err, user, info) => {
+      if (err) {
+        console.error('❌ Ошибка аутентификации Яндекс:', err);
+        return res.redirect(`${SITE_URL}/reg_log.html?error=yandex_failed&details=${encodeURIComponent(err.message)}`);
+      }
+      if (!user) {
+        return res.redirect(`${SITE_URL}/reg_log.html?error=yandex_failed`);
+      }
+      req.logIn(user, (loginErr) => {
+        if (loginErr) {
+          console.error('❌ Ошибка входа:', loginErr);
+          return res.redirect(`${SITE_URL}/reg_log.html?error=login_failed`);
+        }
+        
+        const token = crypto.randomBytes(16).toString('hex');
+        
+        authSessions.set(`auth_${token}`, {
+          userId: req.user.id,
+          username: req.user.username,
+          email: req.user.email,
+          type: 'auth_success'
+        });
+        
+        return res.redirect(`${SITE_URL}/main.html?auth=${token}`);
+      });
+    })(req, res, next);
+  }
+);
 
 app.get('/api/auth/yandex/callback',
   passport.authenticate('yandex', { 
