@@ -46,6 +46,14 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: true,
+    sslmode: 'require'
+  }
+});
+
 passport.serializeUser((user, done) => {
   done(null, user.id);
 });
@@ -68,7 +76,6 @@ passport.use('yandex', new OAuth2Strategy({
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
-      // Проверяем, что pool инициализирован
       if (!pool) {
         console.error('❌ Database pool is not initialized');
         return done(new Error('Database connection error'), null);
@@ -80,17 +87,31 @@ passport.use('yandex', new OAuth2Strategy({
       
       const yandexProfile = userInfoResponse.data;
       
-      // Ищем только по yandex_id или email
       let user = await pool.query(
-        'SELECT * FROM users WHERE yandex_id = $1 OR yandex_email = $2',
-        [yandexProfile.id, yandexProfile.default_email]
+        'SELECT * FROM users WHERE yandex_id = $1',
+        [yandexProfile.id]
       );
       
       if (user.rows.length === 0) {
-        // Новый пользователь через Яндекс
-        const username = yandexProfile.display_name || 
-                        `${yandexProfile.first_name || ''} ${yandexProfile.last_name || ''}`.trim() || 
-                        `Yandex_User_${Date.now()}`;
+        let baseUsername = yandexProfile.display_name || 
+                          yandexProfile.first_name || 
+                          yandexProfile.last_name || 
+                          `Yandex_User`;
+        
+        let username = baseUsername;
+        let counter = 1;
+        
+        while (true) {
+          const existingUser = await pool.query(
+            'SELECT id FROM users WHERE username = $1',
+            [username]
+          );
+          
+          if (existingUser.rows.length === 0) break;
+          
+          username = `${baseUsername}_${counter}`;
+          counter++;
+        }
         
         const avatarUrl = yandexProfile.default_avatar_id 
           ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
@@ -99,24 +120,20 @@ passport.use('yandex', new OAuth2Strategy({
         const newUser = await pool.query(
           `INSERT INTO users (
             username,
-            email,
             email_verified,
             auth_provider,
             yandex_id,
-            yandex_email,
             yandex_first_name,
             yandex_last_name,
             yandex_display_name,
             yandex_avatar_url,
             avatar_url
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
           [
             username,
-            yandexProfile.default_email || null,
             true,
             'yandex',
             yandexProfile.id,
-            yandexProfile.default_email || null,
             yandexProfile.first_name || null,
             yandexProfile.last_name || null,
             yandexProfile.display_name || null,
@@ -126,7 +143,6 @@ passport.use('yandex', new OAuth2Strategy({
         );
         user = newUser;
       } else {
-        // Обновляем данные Яндекса
         const avatarUrl = yandexProfile.default_avatar_id 
           ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
           : null;
@@ -157,6 +173,7 @@ passport.use('yandex', new OAuth2Strategy({
     }
   }
 ));
+
 app.get('/api/auth/yandex', passport.authenticate('yandex'));
 
 app.get('/api/auth/yandex/callback',
@@ -180,41 +197,14 @@ app.get('/api/auth/yandex/callback',
         authSessions.set(`auth_${token}`, {
           userId: req.user.id,
           username: req.user.username,
-          email: req.user.email,
           type: 'auth_success'
         });
         
-        return res.redirect(`${SITE_URL}/index.html?auth=${token}`);
+        return res.redirect(`${SITE_URL}/main.html?auth=${token}`);
       });
     })(req, res, next);
   }
 );
-
-app.get('/api/auth/yandex/callback',
-  passport.authenticate('yandex', { 
-    failureRedirect: `${SITE_URL}/reg_log.html?error=yandex_failed` 
-  }),
-  (req, res) => {
-    const token = crypto.randomBytes(16).toString('hex');
-    
-    authSessions.set(`auth_${token}`, {
-      userId: req.user.id,
-      username: req.user.username,
-      email: req.user.email,
-      type: 'auth_success'
-    });
-    
-    res.redirect(`${SITE_URL}/index.html?auth=${token}`);
-  }
-);
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: true,
-    sslmode: 'require'
-  }
-});
 
 let adminBot;
 let userBot;
@@ -279,7 +269,6 @@ async function initDB() {
   try {
     console.log('🔄 Начинаем инициализацию базы данных...');
     
-    // Сначала проверяем существование таблицы users и создаем если нет
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -289,16 +278,12 @@ async function initDB() {
     `);
     console.log('✅ Базовая таблица users создана');
 
-    // Добавляем все необходимые колонки
     const allColumnsToAdd = [
-      // Основные поля
       { name: 'username', type: 'VARCHAR(100)' },
       { name: 'email', type: 'VARCHAR(255)' },
       { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
       { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' },
       { name: 'avatar_url', type: 'TEXT' },
-      
-      // Telegram поля
       { name: 'tg_id', type: 'BIGINT UNIQUE' },
       { name: 'telegram_username', type: 'VARCHAR(100)' },
       { name: 'telegram_first_name', type: 'VARCHAR(100)' },
@@ -306,8 +291,6 @@ async function initDB() {
       { name: 'telegram_avatar_url', type: 'TEXT' },
       { name: 'first_name', type: 'VARCHAR(100)' },
       { name: 'last_name', type: 'VARCHAR(100)' },
-      
-      // Яндекс поля
       { name: 'yandex_id', type: 'VARCHAR(100) UNIQUE' },
       { name: 'yandex_email', type: 'VARCHAR(255)' },
       { name: 'yandex_first_name', type: 'VARCHAR(100)' },
@@ -328,7 +311,6 @@ async function initDB() {
       }
     }
 
-    // Убираем NOT NULL с tg_id если оно было
     try {
       await pool.query(`
         ALTER TABLE users ALTER COLUMN tg_id DROP NOT NULL
@@ -338,7 +320,6 @@ async function initDB() {
       console.log('ℹ️ tg_id уже может быть NULL или колонка не имеет NOT NULL');
     }
 
-    // Создаем таблицу orders
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
@@ -360,7 +341,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица orders создана');
 
-    // Создаем таблицу wallets
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
@@ -374,7 +354,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица wallets создана');
 
-    // Создаем таблицу wallet_transactions
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
@@ -389,7 +368,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица wallet_transactions создана');
 
-    // Создаем таблицу products
     await pool.query(`
       CREATE TABLE IF NOT EXISTS products (
         id VARCHAR(50) PRIMARY KEY,
@@ -402,7 +380,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица products создана');
 
-    // Создаем таблицу exchange_rate
     await pool.query(`
       CREATE TABLE IF NOT EXISTS exchange_rate (
         id SERIAL PRIMARY KEY,
@@ -413,7 +390,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица exchange_rate создана');
 
-    // Создаем таблицу support_dialogs
     await pool.query(`
       CREATE TABLE IF NOT EXISTS support_dialogs (
         id SERIAL PRIMARY KEY,
@@ -426,7 +402,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица support_dialogs создана');
 
-    // Создаем таблицу support_messages
     await pool.query(`
       CREATE TABLE IF NOT EXISTS support_messages (
         id SERIAL PRIMARY KEY,
@@ -441,7 +416,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица support_messages создана');
 
-    // Показываем финальную структуру таблицы users для проверки
     const tableCheck = await pool.query(`
       SELECT column_name, data_type, is_nullable 
       FROM information_schema.columns 
@@ -461,6 +435,7 @@ async function initDB() {
     throw error;
   }
 }
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -529,6 +504,60 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     if (params) {
       const [action, token] = params.split('_');
       
+      if (action === 'link' && authSessions.has(`link_${token}`)) {
+        const session = authSessions.get(`link_${token}`);
+        
+        if (session.type === 'telegram_link') {
+          console.log(`🔗 Привязка Telegram к пользователю ${session.userId}`);
+          
+          let photoUrl = null;
+          try {
+            const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
+            if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
+              const file = await userBot.getFile(photos.photos[0][0].file_id);
+              if (file && file.file_path) {
+                photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
+              }
+            }
+          } catch (photoError) {}
+          
+          await pool.query(
+            `UPDATE users SET 
+              tg_id = $1,
+              telegram_username = $2,
+              first_name = $3,
+              last_name = $4,
+              telegram_avatar_url = $5,
+              avatar_url = COALESCE($5, avatar_url),
+              auth_provider = CASE 
+                WHEN auth_provider = 'yandex' THEN 'yandex+telegram'
+                ELSE 'telegram'
+              END
+             WHERE id = $6`,
+            [userId, userUsername, userFirstName, userLastName, photoUrl, session.userId]
+          );
+          
+          authSessions.delete(`link_${token}`);
+          
+          const keyboard = {
+            inline_keyboard: [[
+              { 
+                text: '✅ Перейти в профиль', 
+                url: `${SITE_URL}/profile.html` 
+              }
+            ]]
+          };
+          
+          await userBot.sendMessage(
+            chatId, 
+            `✅ Telegram успешно привязан к вашему аккаунту!\n\nТеперь вы можете использовать Telegram для входа в магазин.`,
+            { reply_markup: keyboard }
+          );
+          
+          return;
+        }
+      }
+      
       if (action === 'reg' && authSessions.has(token)) {
         const session = authSessions.get(token);
         
@@ -596,22 +625,12 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             inline_keyboard: [[
               { 
                 text: '✅ Перейти в магазин', 
-                url: `${SITE_URL}/index.html?auth=${token}` 
+                url: `${SITE_URL}/main.html?auth=${token}` 
               }
             ]]
           };
           
-          const welcomeText = `✅ Регистрация успешна!\n\n` +
-            `👤 Ваш профиль:\n` +
-            `🆔 TG ID: ${userId}\n` +
-            `📛 Имя: ${username}\n` +
-            (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
-            (userLastName ? `👤 Фамилия: ${userLastName}\n` : '') +
-            (userUsername ? `👤 Username: @${userUsername}\n` : '') +
-            (photoUrl ? `🖼️ Аватарка: получена\n` : '') +
-            `\nНажмите кнопку ниже для перехода в магазин:`;
-          
-          await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
+          await userBot.sendMessage(chatId, `✅ Регистрация успешна!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
           
           try {
             const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
@@ -693,21 +712,12 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               inline_keyboard: [[
                 { 
                   text: '✅ Перейти в магазин', 
-                  url: `${SITE_URL}/indeex.html?auth=${token}` 
+                  url: `${SITE_URL}/main.html?auth=${token}` 
                 }
               ]]
             };
             
-            const welcomeText = `✅ Вход выполнен!\n\n` +
-              `👤 Ваш профиль:\n` +
-              `🆔 TG ID: ${userId}\n` +
-              `📛 Имя: ${fullUser.username}\n` +
-              (fullUser.first_name ? `👤 Имя в TG: ${fullUser.first_name}\n` : '') +
-              (fullUser.last_name ? `👤 Фамилия в TG: ${fullUser.last_name}\n` : '') +
-              (fullUser.telegram_username ? `👤 Username: @${fullUser.telegram_username}\n` : '') +
-              `\nНажмите кнопку ниже для перехода в магазин:`;
-            
-            await userBot.sendMessage(chatId, welcomeText, { reply_markup: keyboard });
+            await userBot.sendMessage(chatId, `✅ Вход выполнен!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
             
             return;
           } else {
@@ -3657,6 +3667,156 @@ async function handleBackToOrders(msg, page = 1) {
   }
 }
 
+app.post('/api/user/avatar', upload.single('avatar'), async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId || !req.file) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    let processedImage = req.file.buffer;
+    try {
+      processedImage = await sharp(req.file.buffer)
+        .resize(400, 400, { fit: 'cover' })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+    } catch (sharpError) {
+      console.error('Ошибка обработки изображения:', sharpError);
+    }
+    
+    const base64Avatar = `data:image/jpeg;base64,${processedImage.toString('base64')}`;
+    
+    await pool.query(
+      'UPDATE users SET avatar_url = $1 WHERE id = $2',
+      [base64Avatar, userId]
+    );
+    
+    res.json({
+      success: true,
+      avatarUrl: base64Avatar
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обновления аватарки:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/api/user/username', async (req, res) => {
+  try {
+    const { userId, username } = req.body;
+    
+    if (!userId || !username) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    if (username.length < 2 || username.length > 50) {
+      return res.status(400).json({ success: false, error: 'Username must be 2-50 characters' });
+    }
+    
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE username = $1 AND id != $2',
+      [username, userId]
+    );
+    
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'Username already taken' });
+    }
+    
+    await pool.query(
+      'UPDATE users SET username = $1 WHERE id = $2',
+      [username, userId]
+    );
+    
+    res.json({
+      success: true,
+      username: username
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обновления имени:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/api/user/link-telegram', async (req, res) => {
+  try {
+    const { userId, tgId, telegramUsername, firstName, lastName } = req.body;
+    
+    if (!userId || !tgId) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    const existingTg = await pool.query(
+      'SELECT id FROM users WHERE tg_id = $1 AND id != $2',
+      [tgId, userId]
+    );
+    
+    if (existingTg.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'Telegram already linked to another account' });
+    }
+    
+    await pool.query(
+      `UPDATE users SET 
+        tg_id = $1,
+        telegram_username = $2,
+        first_name = $3,
+        last_name = $4,
+        auth_provider = CASE 
+          WHEN auth_provider = 'yandex' THEN 'yandex+telegram'
+          ELSE 'telegram'
+        END
+       WHERE id = $5`,
+      [tgId, telegramUsername, firstName, lastName, userId]
+    );
+    
+    res.json({ success: true });
+    
+  } catch (error) {
+    console.error('Ошибка привязки Telegram:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/user/telegram-link/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const token = crypto.randomBytes(16).toString('hex');
+    const botUsername = await getBotUsername();
+    
+    if (!botUsername) {
+      return res.status(500).json({ success: false, error: 'Bot username not configured' });
+    }
+    
+    const linkToken = `link_${token}`;
+    const telegramLink = `https://t.me/${botUsername}?start=link_${token}`;
+    
+    authSessions.set(linkToken, {
+      type: 'telegram_link',
+      userId: parseInt(userId),
+      createdAt: Date.now()
+    });
+    
+    for (const [key, session] of authSessions.entries()) {
+      if (Date.now() - session.createdAt > 10 * 60 * 1000) {
+        authSessions.delete(key);
+      }
+    }
+    
+    res.json({
+      success: true,
+      telegramLink: telegramLink,
+      token: linkToken
+    });
+    
+  } catch (error) {
+    console.error('Ошибка генерации ссылки для Telegram:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 app.post('/api/support/message', upload.single('file'), async (req, res) => {
   try {
     let user_id, message, dialog_id;
@@ -4327,7 +4487,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
       
       if (session.type === 'auth_success') {
         const userResult = await pool.query(
-          'SELECT id, tg_id, username, first_name, last_name, telegram_username, email, auth_provider, avatar_url FROM users WHERE id = $1',
+          'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url FROM users WHERE id = $1',
           [session.userId]
         );
         
@@ -4353,7 +4513,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
             firstName: user.first_name,
             lastName: user.last_name,
             telegramUsername: user.telegram_username,
-            email: user.email,
             auth_provider: user.auth_provider,
             avatarUrl: user.avatar_url
           }
@@ -4388,7 +4547,7 @@ app.get('/api/auth/profile', async (req, res) => {
     }
     
     const userResult = await pool.query(
-      'SELECT id, tg_id, username, first_name, last_name, telegram_username, email, auth_provider, avatar_url, created_at FROM users WHERE id = $1',
+      'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url, created_at FROM users WHERE id = $1',
       [userId]
     );
     
@@ -4399,7 +4558,7 @@ app.get('/api/auth/profile', async (req, res) => {
     const user = userResult.rows[0];
     
     const ordersResult = await pool.query(
-      `SELECT order_id as id, total, status, payment_status, email, code, 
+      `SELECT order_id as id, total, status, payment_status, code, 
               code_requested, wrong_code_attempts, created_at as date, refund_amount
        FROM orders 
        WHERE user_id = $1 AND (
@@ -4415,7 +4574,6 @@ app.get('/api/auth/profile', async (req, res) => {
       total: order.total,
       status: order.status,
       date: order.date,
-      email: order.email,
       code: order.code,
       refundAmount: order.refund_amount,
       codeRequested: order.code_requested,
@@ -4433,7 +4591,6 @@ app.get('/api/auth/profile', async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         telegramUsername: user.telegram_username,
-        email: user.email,
         auth_provider: user.auth_provider,
         avatarUrl: user.avatar_url,
         createdAt: user.created_at
@@ -4476,7 +4633,7 @@ app.post('/api/create-order', async (req, res) => {
       shop_id: parseInt(BILEE_SHOP_ID),
       notify_url: `${SERVER_URL}/api/bilee-webhook`,
       success_url: `${SITE_URL}/success.html?order=${orderId}`,
-      fail_url: `${SITE_URL}/index.html?payment=fail&order=${orderId}`,
+      fail_url: `${SITE_URL}/main.html?payment=fail&order=${orderId}`,
       expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     };
     
