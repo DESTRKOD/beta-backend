@@ -76,28 +76,41 @@ passport.use('yandex', new OAuth2Strategy({
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
+      // Проверяем, что pool инициализирован
       if (!pool) {
         console.error('❌ Database pool is not initialized');
         return done(new Error('Database connection error'), null);
       }
 
+      // Получаем информацию о пользователе из Яндекс API
       const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
         params: { format: 'json', oauth_token: accessToken }
       });
       
       const yandexProfile = userInfoResponse.data;
       
+      // Ищем пользователя по yandex_id (основной идентификатор)
       let user = await pool.query(
         'SELECT * FROM users WHERE yandex_id = $1',
         [yandexProfile.id]
       );
       
+      // Формируем URL аватарки если есть
+      const avatarUrl = yandexProfile.default_avatar_id 
+        ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
+        : null;
+      
       if (user.rows.length === 0) {
+        // ===== НОВЫЙ ПОЛЬЗОВАТЕЛЬ =====
+        console.log('📝 Регистрация нового пользователя через Яндекс');
+        
+        // Генерируем базовое имя пользователя
         let baseUsername = yandexProfile.display_name || 
                           yandexProfile.first_name || 
                           yandexProfile.last_name || 
                           `Yandex_User`;
         
+        // Проверяем уникальность имени и добавляем суффикс если нужно
         let username = baseUsername;
         let counter = 1;
         
@@ -113,10 +126,7 @@ passport.use('yandex', new OAuth2Strategy({
           counter++;
         }
         
-        const avatarUrl = yandexProfile.default_avatar_id 
-          ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
-          : null;
-        
+        // Создаем нового пользователя
         const newUser = await pool.query(
           `INSERT INTO users (
             username,
@@ -132,7 +142,7 @@ passport.use('yandex', new OAuth2Strategy({
           [
             username,
             true,
-            'yandex',
+            'yandex',  // Новый пользователь - чистый Яндекс
             yandexProfile.id,
             yandexProfile.first_name || null,
             yandexProfile.last_name || null,
@@ -141,22 +151,37 @@ passport.use('yandex', new OAuth2Strategy({
             avatarUrl
           ]
         );
+        
         user = newUser;
+        console.log(`✅ Новый пользователь создан: ID ${user.rows[0].id}, username: ${username}`);
+        
       } else {
-        const avatarUrl = yandexProfile.default_avatar_id 
-          ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
-          : null;
-          
+        // ===== СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ =====
+        console.log(`🔄 Обновление данных пользователя ID: ${user.rows[0].id}`);
+        
+        // Определяем текущий провайдер
+        const currentProvider = user.rows[0].auth_provider;
+        
+        // Если у пользователя был Telegram, сохраняем комбинированный провайдер
+        let newProvider = 'yandex';
+        if (currentProvider === 'yandex+telegram' || currentProvider === 'telegram') {
+          newProvider = 'yandex+telegram';
+          console.log('📌 Сохраняем привязку Telegram');
+        }
+        
+        // Обновляем данные пользователя
         user = await pool.query(
           `UPDATE users SET 
             last_login = CURRENT_TIMESTAMP,
-            yandex_first_name = COALESCE($1, yandex_first_name),
-            yandex_last_name = COALESCE($2, yandex_last_name),
-            yandex_display_name = COALESCE($3, yandex_display_name),
-            yandex_avatar_url = COALESCE($4, yandex_avatar_url),
-            avatar_url = COALESCE($4, avatar_url)
-           WHERE id = $5 RETURNING *`,
+            auth_provider = $1,
+            yandex_first_name = COALESCE($2, yandex_first_name),
+            yandex_last_name = COALESCE($3, yandex_last_name),
+            yandex_display_name = COALESCE($4, yandex_display_name),
+            yandex_avatar_url = COALESCE($5, yandex_avatar_url),
+            avatar_url = COALESCE($5, avatar_url)
+           WHERE id = $6 RETURNING *`,
           [
+            newProvider,
             yandexProfile.first_name || null,
             yandexProfile.last_name || null,
             yandexProfile.display_name || null,
@@ -164,9 +189,13 @@ passport.use('yandex', new OAuth2Strategy({
             user.rows[0].id
           ]
         );
+        
+        console.log(`✅ Данные пользователя обновлены. Провайдер: ${newProvider}`);
       }
       
+      // Возвращаем пользователя
       return done(null, user.rows[0]);
+      
     } catch (error) {
       console.error('❌ Ошибка Яндекс авторизации:', error);
       return done(error, null);
@@ -3781,6 +3810,79 @@ app.post('/api/user/username', async (req, res) => {
     
   } catch (error) {
     console.error('Ошибка обновления имени:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+// Отвязка Telegram аккаунта
+app.post('/api/user/unlink-telegram', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'Missing user ID' });
+    }
+    
+    // Получаем текущего пользователя
+    const userResult = await pool.query(
+      'SELECT auth_provider FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    const currentProvider = userResult.rows[0].auth_provider;
+    
+    // Определяем новый провайдер
+    let newProvider = 'yandex';
+    if (currentProvider === 'yandex+telegram') {
+      newProvider = 'yandex';
+    } else if (currentProvider === 'telegram') {
+      // Если это чисто Telegram аккаунт, можно сделать его email или удалить?
+      // Лучше запретить отвязку для чисто Telegram аккаунтов
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Cannot unlink Telegram from Telegram-only account' 
+      });
+    }
+    
+    // Обновляем пользователя - убираем все Telegram данные
+    await pool.query(
+      `UPDATE users SET 
+        tg_id = NULL,
+        telegram_username = NULL,
+        first_name = NULL,
+        last_name = NULL,
+        telegram_avatar_url = NULL,
+        auth_provider = $1
+       WHERE id = $2`,
+      [newProvider, userId]
+    );
+    
+    // Если у пользователя была аватарка из Telegram, но нет своей, удаляем её
+    const userWithAvatar = await pool.query(
+      'SELECT avatar_url, telegram_avatar_url FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    const user = userWithAvatar.rows[0];
+    if (user.avatar_url === user.telegram_avatar_url) {
+      await pool.query(
+        'UPDATE users SET avatar_url = NULL WHERE id = $1',
+        [userId]
+      );
+    }
+    
+    res.json({ 
+      success: true,
+      message: 'Telegram unlinked successfully'
+    });
+    
+  } catch (error) {
+    console.error('Ошибка отвязки Telegram:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
