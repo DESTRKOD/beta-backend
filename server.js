@@ -510,6 +510,21 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'telegram_link') {
           console.log(`🔗 Привязка Telegram к пользователю ${session.userId}`);
           
+          // Проверяем, не привязан ли уже этот Telegram к другому аккаунту
+          const existingUser = await pool.query(
+            'SELECT id FROM users WHERE tg_id = $1 AND id != $2',
+            [userId, session.userId]
+          );
+          
+          if (existingUser.rows.length > 0) {
+            await userBot.sendMessage(
+              chatId,
+              `❌ Этот Telegram аккаунт уже привязан к другому пользователю.\n\nЕсли это ошибка, обратитесь в поддержку.`
+            );
+            authSessions.delete(`link_${token}`);
+            return;
+          }
+          
           let photoUrl = null;
           try {
             const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
@@ -564,6 +579,21 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'register') {
           console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
           
+          // Проверяем, не зарегистрирован ли уже этот Telegram
+          const existingUser = await pool.query(
+            'SELECT id FROM users WHERE tg_id = $1',
+            [userId]
+          );
+          
+          if (existingUser.rows.length > 0) {
+            await userBot.sendMessage(chatId, 
+              `❌ Этот Telegram аккаунт уже зарегистрирован!\n\n` +
+              `Попробуйте войти через "Вход" на сайте.`
+            );
+            authSessions.delete(token);
+            return;
+          }
+          
           let username = '';
           
           if (userFirstName && userLastName) {
@@ -596,12 +626,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           const result = await pool.query(
             `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username, auth_provider) 
              VALUES ($1, $2, $3, $4, $5, $6, $7) 
-             ON CONFLICT (tg_id) DO UPDATE SET 
-               last_login = CURRENT_TIMESTAMP, 
-               avatar_url = COALESCE($3, users.avatar_url),
-               first_name = COALESCE($4, users.first_name),
-               last_name = COALESCE($5, users.last_name),
-               telegram_username = COALESCE($6, users.telegram_username)
              RETURNING id`,
             [userId, username, photoUrl, userFirstName, userLastName, userUsername, 'telegram']
           );
@@ -646,7 +670,8 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           
           return;
         }
-      } 
+      }
+      
       else if (action === 'login' && authSessions.has(token)) {
         const session = authSessions.get(token);
         
@@ -771,6 +796,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     } catch (sendError) {}
   }
 });
+
 
 userBot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
@@ -3677,12 +3703,31 @@ app.post('/api/user/avatar', upload.single('avatar'), async (req, res) => {
     
     let processedImage = req.file.buffer;
     try {
-      processedImage = await sharp(req.file.buffer)
-        .resize(400, 400, { fit: 'cover' })
-        .jpeg({ quality: 85 })
+      // Читаем метаданные изображения для определения ориентации
+      const metadata = await sharp(req.file.buffer).metadata();
+      
+      // Создаем цепочку обработки
+      let sharpInstance = sharp(req.file.buffer);
+      
+      // Автоматически поворачиваем изображение на основе EXIF данных
+      sharpInstance = sharpInstance.rotate();
+      
+      // Изменяем размер
+      processedImage = await sharpInstance
+        .resize(400, 400, { 
+          fit: 'cover',
+          withoutEnlargement: true 
+        })
+        .jpeg({ 
+          quality: 85,
+          progressive: true 
+        })
         .toBuffer();
+        
     } catch (sharpError) {
       console.error('Ошибка обработки изображения:', sharpError);
+      // Если ошибка, пробуем без обработки
+      processedImage = req.file.buffer;
     }
     
     const base64Avatar = `data:image/jpeg;base64,${processedImage.toString('base64')}`;
