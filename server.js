@@ -1743,6 +1743,7 @@ adminBot.on('callback_query', async (cb) => {
 
   console.log('Callback получен:', data);
 
+  // ===== ДИАЛОГИ ПОДДЕРЖКИ =====
   if (data.startsWith('dialogs_filter:')) {
     const filter = data.split(':')[1];
     await adminBot.deleteMessage(chatId, messageId);
@@ -1878,6 +1879,122 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
+  if (data.startsWith('support_close:')) {
+    const dialogId = parseInt(data.split(':')[1]);
+    
+    try {
+      const dialog = await pool.query(
+        'SELECT user_id, status FROM support_dialogs WHERE id = $1',
+        [dialogId]
+      );
+      
+      if (dialog.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { text: '❌ Диалог не найден', show_alert: true });
+      }
+      
+      if (dialog.rows[0].status === 'closed') {
+        return adminBot.answerCallbackQuery(cb.id, { text: '✅ Диалог уже закрыт', show_alert: true });
+      }
+      
+      await pool.query(
+        'UPDATE support_dialogs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        ['closed', dialogId]
+      );
+      
+      const userRes = await pool.query(
+        'SELECT tg_id FROM users WHERE id = $1',
+        [dialog.rows[0].user_id]
+      );
+      
+      if (userRes.rows.length > 0 && userRes.rows[0].tg_id) {
+        try {
+          await userBot.sendMessage(
+            userRes.rows[0].tg_id,
+            `✅ Диалог #${dialogId} закрыт администратором.\n\nСпасибо за обращение! Если у вас остались вопросы, создайте новый диалог.`
+          );
+        } catch (notifyError) {
+          console.error('Ошибка уведомления пользователя:', notifyError);
+        }
+      }
+      
+      await adminBot.editMessageText(
+        `✅ Диалог #${dialogId} успешно закрыт`,
+        { chat_id: chatId, message_id: messageId }
+      );
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Диалог закрыт', 
+        show_alert: false 
+      });
+      
+    } catch (error) {
+      console.error('❌ Ошибка закрытия диалога:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при закрытии диалога', 
+        show_alert: true 
+      });
+    }
+    return;
+  }
+
+  if (data.startsWith('support_userinfo:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const userResult = await pool.query(`
+        SELECT u.*, 
+               (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as orders_count,
+               (SELECT SUM(total) FROM orders WHERE user_id = u.id AND payment_status = 'confirmed') as total_spent,
+               (SELECT COUNT(*) FROM support_dialogs WHERE user_id = u.id) as dialogs_count
+        FROM users u
+        WHERE u.id = $1
+      `, [userId]);
+      
+      if (userResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Пользователь не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const user = userResult.rows[0];
+      
+      let infoText = `👤 **Информация о пользователе**\n\n`;
+      infoText += `**ID в магазине:** ${user.id}\n`;
+      infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
+      infoText += `**TG ID:** ${user.tg_id || 'Не привязан'}\n`;
+      infoText += `**Telegram Username:** @${user.telegram_username || 'отсутствует'}\n`;
+      infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
+      infoText += `\n\n**Статистика:**\n`;
+      infoText += `• Заказов: ${user.orders_count || 0}\n`;
+      infoText += `• Потрачено: ${formatRub(user.total_spent || 0)}\n`;
+      infoText += `• Обращений в поддержку: ${user.dialogs_count || 0}\n`;
+      infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
+      infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
+      
+      await adminBot.sendMessage(chatId, infoText, { parse_mode: 'Markdown' });
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения инфо о пользователе:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
+    return;
+  }
+
+  if (data === 'dialogs_all') {
+    const fakeMsg = { ...cb.message, text: '/dialogs', chat: { id: chatId } };
+    await adminBot.emit('text', fakeMsg);
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  // ===== ЗАКАЗЫ И ФИЛЬТРЫ =====
   if (data.startsWith('order_detail:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -1889,25 +2006,234 @@ adminBot.on('callback_query', async (cb) => {
 
   if (data.startsWith('orders_page:')) {
     const page = data.split(':')[1];
-    await handleOrdersPage(cb.message, page, cb.id);
+    
+    try {
+      const chatId = cb.message.chat.id;
+      const limit = 10;
+      const offset = (page - 1) * limit;
+      
+      let query = `
+        SELECT order_id, total, status, created_at, payment_status, user_id
+        FROM orders 
+        WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+      `;
+      
+      const queryParams = [];
+      
+      if (filterStates[chatId]) {
+        const filter = filterStates[chatId];
+        if (filter.userId) {
+          query += ` AND user_id = $${queryParams.length + 1}`;
+          queryParams.push(filter.userId);
+        }
+        if (filter.dateFrom) {
+          query += ` AND created_at >= $${queryParams.length + 1}`;
+          queryParams.push(filter.dateFrom);
+        }
+        if (filter.dateTo) {
+          query += ` AND created_at <= $${queryParams.length + 1}`;
+          queryParams.push(filter.dateTo);
+        }
+      }
+      
+      query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+      queryParams.push(limit, offset);
+      
+      const result = await pool.query(query, queryParams);
+      
+      let countQuery = `
+        SELECT COUNT(*) as total 
+        FROM orders 
+        WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+      `;
+      
+      const countParams = [];
+      if (filterStates[chatId]) {
+        const filter = filterStates[chatId];
+        if (filter.userId) {
+          countQuery += ` AND user_id = $${countParams.length + 1}`;
+          countParams.push(filter.userId);
+        }
+        if (filter.dateFrom) {
+          countQuery += ` AND created_at >= $${countParams.length + 1}`;
+          countParams.push(filter.dateFrom);
+        }
+        if (filter.dateTo) {
+          countQuery += ` AND created_at <= $${countParams.length + 1}`;
+          countParams.push(filter.dateTo);
+        }
+      }
+      
+      const countResult = await pool.query(countQuery, countParams);
+      
+      const totalOrders = parseInt(countResult.rows[0].total);
+      const totalPages = Math.ceil(totalOrders / limit);
+      
+      if (result.rows.length === 0) {
+        await adminBot.editMessageText('📭 Нет заказов', {
+          chat_id: cb.message.chat.id,
+          message_id: cb.message.message_id
+        });
+        return;
+      }
+      
+      orderPages[chatId] = parseInt(page);
+      
+      let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
+      if (filterStates[chatId]) {
+        ordersText += `🔍 Фильтр активен\n\n`;
+      }
+      
+      const inlineKeyboard = [];
+      
+      inlineKeyboard.push([
+        { text: '🔍 Фильтр заказов', callback_data: 'show_filters' }
+      ]);
+      
+      result.rows.forEach((order, index) => {
+        const orderNumber = offset + index + 1;
+        
+        let userInfo = '';
+        if (order.user_id) {
+          userInfo = ` (ID: ${order.user_id})`;
+        }
+        
+        ordersText += `${orderNumber}. #${order.order_id}${userInfo}\n`;
+        ordersText += `   Сумма: ${formatRub(order.total)}\n`;
+        ordersText += `   Статус: ${getStatusText(order.status)}\n`;
+        ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
+        
+        inlineKeyboard.push([
+          { 
+            text: `#${order.order_id} - ${formatRub(order.total)}`, 
+            callback_data: `order_detail:${order.order_id}:${page}` 
+          }
+        ]);
+      });
+      
+      const paginationButtons = [];
+      
+      if (page > 1) {
+        paginationButtons.push({ text: '⬅️ Назад', callback_data: `orders_page:${parseInt(page)-1}` });
+      }
+      
+      if (page < totalPages) {
+        paginationButtons.push({ text: '➡️ Вперед', callback_data: `orders_page:${parseInt(page)+1}` });
+      }
+      
+      if (filterStates[chatId]) {
+        paginationButtons.push({ text: '❌ Сбросить фильтр', callback_data: 'clear_filters' });
+      }
+      
+      if (paginationButtons.length > 0) {
+        inlineKeyboard.push(paginationButtons);
+      }
+      
+      const keyboard = {
+        inline_keyboard: inlineKeyboard
+      };
+      
+      await adminBot.editMessageText(ordersText, {
+        chat_id: cb.message.chat.id,
+        message_id: cb.message.message_id,
+        reply_markup: keyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (error) {
+      console.error('❌ Ошибка смены страницы:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при загрузке страницы',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data === 'show_filters') {
-    await showFilterOptions(cb.message, cb.id);
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '📅 Сегодня', callback_data: 'filter_date:today' },
+          { text: '📅 Вчера', callback_data: 'filter_date:yesterday' }
+        ],
+        [
+          { text: '📅 Эта неделя', callback_data: 'filter_date:week' },
+          { text: '📅 Этот месяц', callback_data: 'filter_date:month' }
+        ],
+        [
+          { text: '👤 По ID пользователя', callback_data: 'filter_user_prompt' }
+        ],
+        [
+          { text: '❌ Сбросить фильтр', callback_data: 'clear_filters' }
+        ]
+      ]
+    };
+    
+    await adminBot.editMessageText('🔍 Выберите тип фильтрации:', {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: keyboard
+    });
+    
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
 
   if (data === 'clear_filters') {
     delete filterStates[chatId];
     await adminBot.answerCallbackQuery(cb.id, { text: '✅ Фильтр сброшен' });
-    await adminBot.emit('text', { ...cb.message, text: '/orders 1', chat: { id: chatId } });
+    
+    const fakeMsg = { ...cb.message, text: '/orders 1', chat: { id: chatId } };
+    await adminBot.emit('text', fakeMsg);
     return;
   }
 
   if (data.startsWith('filter_date:')) {
     const filterType = data.split(':')[1];
-    await handleDateFilter(cb.message, filterType, cb.id);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    let dateFrom, dateTo;
+    
+    switch(filterType) {
+      case 'today':
+        dateFrom = today;
+        dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+        break;
+      case 'yesterday':
+        dateFrom = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        dateTo = new Date(today.getTime() - 1);
+        break;
+      case 'week':
+        const firstDayOfWeek = today.getDate() - today.getDay() + (today.getDay() === 0 ? -6 : 1);
+        dateFrom = new Date(today.getFullYear(), today.getMonth(), firstDayOfWeek);
+        dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+        break;
+      case 'month':
+        dateFrom = new Date(today.getFullYear(), today.getMonth(), 1);
+        dateTo = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1);
+        break;
+    }
+    
+    filterStates[chatId] = {
+      dateFrom: dateFrom,
+      dateTo: dateTo
+    };
+    
+    const filterNames = {
+      today: 'сегодня',
+      yesterday: 'вчера',
+      week: 'эту неделю',
+      month: 'этот месяц'
+    };
+    
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: `✅ Фильтр применен: ${filterNames[filterType]}` 
+    });
+    
+    const fakeMsg = { ...cb.message, text: '/orders 1', chat: { id: chatId } };
+    await adminBot.emit('text', fakeMsg);
     return;
   }
 
@@ -1921,48 +2247,453 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
+  // ===== УПРАВЛЕНИЕ ЗАКАЗАМИ =====
   if (data.startsWith('request_code:')) {
     const orderId = data.split(':')[1];
-    await handleRequestCode(orderId, cb.message, cb.id);
+    
+    try {
+      console.log(`📝 Запрос кода для заказа ${orderId}`);
+      
+      await pool.query(
+        "UPDATE orders SET code_requested = TRUE, wrong_code_attempts = 0, status = 'waiting_code_request' WHERE order_id = $1",
+        [orderId]
+      );
+      
+      const orderResult = await pool.query(
+        'SELECT email, total FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      const order = orderResult.rows[0];
+      const message = `📝 Код запрошен для заказа #${orderId}\n\n📧 Email: ${order?.email || 'не указан'}\n💰 Сумма: ${formatRub(order?.total || 0)}\n\n✅ Пользователю открыт экран для ввода кода.`;
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Код запрошен у пользователя',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка запроса кода:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при запросе кода',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('order_ready:')) {
     const orderId = data.split(':')[1];
-    await handleOrderReady(orderId, cb.message, cb.id);
+    
+    try {
+      console.log(`✅ Подтверждаем код для заказа ${orderId}`);
+      const orderResult = await pool.query(
+        'SELECT code, email, total FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Заказ не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      if (!order.code) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Код не введен пользователем',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      await pool.query(
+        "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+        [orderId]
+      );
+      
+      const message = `✅ Заказ #${orderId} завершен\n\n💰 Сумма: ${formatRub(order.total)}\n📧 Email: ${order.email || 'не указан'}\n🔢 Код: ${order.code}\n\n✅ Заказ успешно обработан и завершен.`;
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Заказ завершен',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка подтверждения кода:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('wrong_code:')) {
     const orderId = data.split(':')[1];
-    await handleWrongCode(orderId, cb.message, cb.id);
+    
+    try {
+      console.log(`❌ Отмечаем код как неверный для заказа ${orderId}`);
+      
+      const orderResult = await pool.query(
+        'SELECT wrong_code_attempts, email FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Заказ не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const currentAttempts = orderResult.rows[0].wrong_code_attempts || 0;
+      const newAttempts = currentAttempts + 1;
+      
+      await pool.query(
+        "UPDATE orders SET wrong_code_attempts = $1, code = NULL, code_requested = FALSE, status = 'waiting' WHERE order_id = $2",
+        [newAttempts, orderId]
+      );
+      
+      let message = `❌ Код для заказа #${orderId} отмечен как неверный\n\n`;
+      message += `Неверных попыток: ${newAttempts}\n`;
+      message += `Пользователю показан экран с ошибкой и ожидает нового запроса кода.`;
+      
+      if (newAttempts >= 2) {
+        message += `\n\n⚠️ Пользователь будет перенаправлен в поддержку.`;
+      }
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Код отмечен неверным',
+        show_alert: false 
+      });
+    } catch (error) {
+      console.error('❌ Ошибка отметки кода как неверного:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('mark_completed:')) {
     const orderId = data.split(':')[1];
-    await handleMarkCompleted(orderId, cb.message, cb.id);
+    
+    try {
+      console.log(`✅ Помечаем заказ ${orderId} как готовый`);
+      const orderResult = await pool.query(
+        'SELECT status, email, code, code_requested FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Заказ не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      if (order.status === 'completed') {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '⚠️ Заказ уже отмечен как готовый',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      if (order.code_requested && !order.code) {
+        const confirmKeyboard = {
+          inline_keyboard: [[
+            { text: '✅ Да, все равно завершить', callback_data: `force_complete:${orderId}` },
+            { text: '❌ Отмена', callback_data: `order_detail:${orderId}` }
+          ]]
+        };
+        
+        await adminBot.editMessageText(`⚠️ Внимание!\n\nКод был запрошен у пользователя, но он еще не ввел код.\n\nВы уверены, что хотите завершить заказ без кода?`, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: confirmKeyboard
+        });
+        
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '⚠️ Требуется подтверждение',
+          show_alert: false 
+        });
+        return;
+      }
+      
+      await pool.query(
+        "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+        [orderId]
+      );
+      
+      const orderResult2 = await pool.query(
+        'SELECT email, code FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      const order2 = orderResult2.rows[0];
+      let message = `✅ Заказ #${orderId} отмечен как готовый\n\n`;
+      if (order2.email) message += `📧 Email: ${order2.email}\n`;
+      if (order2.code) message += `🔢 Код: ${order2.code}\n`;
+      message += `\n✅ Пользователь будет уведомлен о готовности заказа.`;
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Заказ отмечен как готовый',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка отметки заказа как готового:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при обновлении статуса заказа',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('back_to_orders:')) {
     const page = data.split(':')[1] || 1;
-    await handleBackToOrders(cb.message, page);
-    await adminBot.answerCallbackQuery(cb.id);
+    
+    try {
+      const chatId = cb.message.chat.id;
+      const limit = 10;
+      const offset = (page - 1) * limit;
+      
+      let query = `
+        SELECT order_id, total, status, created_at, payment_status, user_id
+        FROM orders 
+        WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+      `;
+      
+      const queryParams = [];
+      
+      if (filterStates[chatId]) {
+        const filter = filterStates[chatId];
+        if (filter.userId) {
+          query += ` AND user_id = $${queryParams.length + 1}`;
+          queryParams.push(filter.userId);
+        }
+        if (filter.dateFrom) {
+          query += ` AND created_at >= $${queryParams.length + 1}`;
+          queryParams.push(filter.dateFrom);
+        }
+        if (filter.dateTo) {
+          query += ` AND created_at <= $${queryParams.length + 1}`;
+          queryParams.push(filter.dateTo);
+        }
+      }
+      
+      query += ` ORDER BY created_at DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+      queryParams.push(limit, offset);
+      
+      const result = await pool.query(query, queryParams);
+      
+      let countQuery = `
+        SELECT COUNT(*) as total 
+        FROM orders 
+        WHERE payment_status = 'confirmed' OR status IN ('completed', 'waiting', 'waiting_code_request', 'manyback')
+      `;
+      
+      const countParams = [];
+      if (filterStates[chatId]) {
+        const filter = filterStates[chatId];
+        if (filter.userId) {
+          countQuery += ` AND user_id = $${countParams.length + 1}`;
+          countParams.push(filter.userId);
+        }
+        if (filter.dateFrom) {
+          countQuery += ` AND created_at >= $${countParams.length + 1}`;
+          countParams.push(filter.dateFrom);
+        }
+        if (filter.dateTo) {
+          countQuery += ` AND created_at <= $${countParams.length + 1}`;
+          countParams.push(filter.dateTo);
+        }
+      }
+      
+      const countResult = await pool.query(countQuery, countParams);
+      
+      const totalOrders = parseInt(countResult.rows[0].total);
+      const totalPages = Math.ceil(totalOrders / limit);
+      
+      if (result.rows.length === 0) {
+        await adminBot.editMessageText('📭 Нет заказов', {
+          chat_id: chatId,
+          message_id: messageId
+        });
+        return;
+      }
+      
+      orderPages[chatId] = page;
+      
+      let ordersText = `📋 Заказы (страница ${page}/${totalPages})\n\n`;
+      if (filterStates[chatId]) {
+        ordersText += `🔍 Фильтр активен\n\n`;
+      }
+      
+      const inlineKeyboard = [];
+      
+      inlineKeyboard.push([
+        { text: '🔍 Фильтр заказов', callback_data: 'show_filters' }
+      ]);
+      
+      result.rows.forEach((order, index) => {
+        const orderNumber = offset + index + 1;
+        
+        let userInfo = '';
+        if (order.user_id) {
+          userInfo = ` (ID: ${order.user_id})`;
+        }
+        
+        ordersText += `${orderNumber}. #${order.order_id}${userInfo}\n`;
+        ordersText += `   Сумма: ${formatRub(order.total)}\n`;
+        ordersText += `   Статус: ${getStatusText(order.status)}\n`;
+        ordersText += `   Дата: ${new Date(order.created_at).toLocaleString('ru-RU')}\n\n`;
+        
+        inlineKeyboard.push([
+          { 
+            text: `#${order.order_id} - ${formatRub(order.total)}`, 
+            callback_data: `order_detail:${order.order_id}:${page}` 
+          }
+        ]);
+      });
+      
+      const paginationButtons = [];
+      
+      if (page > 1) {
+        paginationButtons.push({ text: '⬅️ Назад', callback_data: `orders_page:${page-1}` });
+      }
+      
+      if (page < totalPages) {
+        paginationButtons.push({ text: '➡️ Вперед', callback_data: `orders_page:${page+1}` });
+      }
+      
+      if (filterStates[chatId]) {
+        paginationButtons.push({ text: '❌ Сбросить фильтр', callback_data: 'clear_filters' });
+      }
+      
+      if (paginationButtons.length > 0) {
+        inlineKeyboard.push(paginationButtons);
+      }
+      
+      const keyboard = {
+        inline_keyboard: inlineKeyboard
+      };
+      
+      await adminBot.editMessageText(ordersText, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: keyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (error) {
+      console.error('Ошибка возврата к заказам:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('force_complete:')) {
     const orderId = data.split(':')[1];
-    await completeOrder(orderId, cb.message, cb.id);
+    
+    try {
+      await pool.query(
+        "UPDATE orders SET status = 'completed' WHERE order_id = $1",
+        [orderId]
+      );
+      
+      const orderResult = await pool.query(
+        'SELECT email, code FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      const order = orderResult.rows[0];
+      let message = `✅ Заказ #${orderId} принудительно завершен\n\n`;
+      if (order.email) message += `📧 Email: ${order.email}\n`;
+      if (order.code) message += `🔢 Код: ${order.code}\n`;
+      message += `\n⚠️ Заказ завершен без ввода кода.`;
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Заказ принудительно завершен',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка принудительного завершения:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
+  // ===== ОТМЕНА ЗАКАЗА =====
   if (data.startsWith('cancel_order:')) {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleCancelOrder(orderId, cb.message, cb.id, returnPage);
+    
+    try {
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '✅ Да, отменить заказ', callback_data: `confirm_cancel_order:${orderId}:${returnPage}` },
+            { text: '❌ Нет, оставить', callback_data: `order_detail:${orderId}:${returnPage}` }
+          ]
+        ]
+      };
+      
+      await adminBot.editMessageText(`⚠️ Вы уверены, что хотите отменить заказ #${orderId}?\n\nЭто действие нельзя отменить.`, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: confirmKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: 'Подтвердите отмену',
+        show_alert: false 
+      });
+    } catch (error) {
+      console.error('❌ Ошибка подтверждения отмены:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
@@ -1970,15 +2701,103 @@ adminBot.on('callback_query', async (cb) => {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleConfirmCancelOrder(orderId, cb.message, cb.id, returnPage);
+    
+    try {
+      await pool.query(
+        'UPDATE orders SET status = $1 WHERE order_id = $2',
+        ['canceled', orderId]
+      );
+      
+      const orderResult = await pool.query(
+        'SELECT total, email FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      const order = orderResult.rows[0];
+      let message = `✅ Заказ #${orderId} отменен\n\n`;
+      message += `💰 Сумма: ${formatRub(order.total)}\n`;
+      if (order.email) message += `📧 Email: ${order.email}\n`;
+      message += `\n❌ Статус заказа изменен на "Отменен".`;
+      
+      await adminBot.editMessageText(message, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Заказ отменен',
+        show_alert: false
+      });
+      
+      setTimeout(async () => {
+        await showOrderDetails(chatId, messageId, orderId, returnPage);
+      }, 2000);
+    } catch (error) {
+      console.error('❌ Ошибка отмены заказа:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при отмене заказа',
+        show_alert: true 
+      });
+    }
     return;
   }
 
+  // ===== ВОЗВРАТЫ =====
   if (data.startsWith('process_refund:')) {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleProcessRefund(orderId, cb.message, cb.id, returnPage);
+    
+    try {
+      const orderResult = await pool.query(
+        'SELECT total, status FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Заказ не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      
+      if (order.status === 'manyback') {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '⚠️ Возврат уже оформлен',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '✅ Да, оформить возврат', callback_data: `confirm_refund:${orderId}:${returnPage}` },
+            { text: '❌ Нет, отмена', callback_data: `order_detail:${orderId}:${returnPage}` }
+          ]
+        ]
+      };
+      
+      await adminBot.editMessageText(`💰 Оформление возврата для заказа #${orderId}\n\n💰 Сумма заказа: ${formatRub(order.total)}\n\n⚠️ Вы уверены, что хотите оформить возврат?\nПосле подтверждения нужно будет ввести сумму возврата.`, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: confirmKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: 'Подтвердите оформление возврата',
+        show_alert: false 
+      });
+    } catch (error) {
+      console.error('❌ Ошибка оформления возврата:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
@@ -1986,7 +2805,58 @@ adminBot.on('callback_query', async (cb) => {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleConfirmRefund(orderId, cb.message, cb.id, returnPage);
+    
+    try {
+      const orderResult = await pool.query(
+        'SELECT total, user_id FROM orders WHERE order_id = $1',
+        [orderId]
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Заказ не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      const maxAmount = order.total;
+      const userId = order.user_id;
+      
+      if (!userId) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ К заказу не привязан пользователь',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      userStates[chatId] = {
+        action: 'process_refund',
+        step: 'awaiting_refund_amount',
+        orderId: orderId,
+        userId: userId,
+        orderTotal: maxAmount,
+        returnPage: parseInt(returnPage)
+      };
+      
+      await adminBot.editMessageText(`💰 Введите сумму возврата для заказа #${orderId}\n\n💰 Сумма заказа: ${formatRub(maxAmount)}\n\nВведите сумму возврата (не больше ${maxAmount}₽):`, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: 'Введите сумму возврата',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка подтверждения возврата:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
@@ -1994,7 +2864,65 @@ adminBot.on('callback_query', async (cb) => {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleCancelRefund(orderId, cb.message, cb.id, returnPage);
+    
+    try {
+      const orderResult = await pool.query(
+        'SELECT refund_amount, user_id, total FROM orders WHERE order_id = $1 AND status = $2',
+        [orderId, 'manyback']
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Возврат не найден или уже отменен',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      const refundAmount = order.refund_amount;
+      const userId = order.user_id;
+      
+      if (!userId) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ К заказу не привязан пользователь',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const confirmKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '✅ Да, отменить возврат', callback_data: `confirm_cancel_refund:${orderId}:${returnPage}` },
+            { text: '❌ Нет', callback_data: `order_detail:${orderId}:${returnPage}` }
+          ]
+        ]
+      };
+      
+      await adminBot.editMessageText(`⚠️ Отмена возврата для заказа #${orderId}\n\n` +
+        `💰 Сумма возврата: ${formatRub(refundAmount)}\n` +
+        `👤 Пользователь ID: ${userId}\n\n` +
+        `⚠️ Средства будут списаны с доступного баланса пользователя DCoin.\n` +
+        `💰 Баланс пользователя может уйти в минус, если средств недостаточно.\n\n` +
+        `Вы уверены?`, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: confirmKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: 'Подтвердите отмену возврата',
+        show_alert: false
+      });
+      
+    } catch (error) {
+      console.error('❌ Ошибка отмены возврата:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
@@ -2002,10 +2930,162 @@ adminBot.on('callback_query', async (cb) => {
     const parts = data.split(':');
     const orderId = parts[1];
     const returnPage = parts[2] || 1;
-    await handleConfirmCancelRefund(orderId, cb.message, cb.id, returnPage);
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      const orderResult = await client.query(
+        'SELECT refund_amount, user_id FROM orders WHERE order_id = $1 AND status = $2 FOR UPDATE',
+        [orderId, 'manyback']
+      );
+      
+      if (orderResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Возврат не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const order = orderResult.rows[0];
+      const refundAmount = order.refund_amount;
+      const userId = order.user_id;
+      
+      const walletResult = await client.query(
+        'SELECT available_balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+        [userId]
+      );
+      
+      let wallet = walletResult.rows[0];
+      
+      if (!wallet) {
+        await client.query(
+          'INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) VALUES ($1, 0, 0, 0)',
+          [userId]
+        );
+        wallet = { available_balance: 0 };
+      }
+      
+      const currentBalance = wallet.available_balance || 0;
+      
+      await client.query(
+        'UPDATE wallets SET available_balance = available_balance - $1 WHERE user_id = $2',
+        [refundAmount, userId]
+      );
+      
+      await client.query(
+        'UPDATE orders SET status = $1, refund_amount = NULL WHERE order_id = $2',
+        ['completed', orderId]
+      );
+      
+      await client.query(
+        `INSERT INTO wallet_transactions 
+         (user_id, type, amount, description, order_id, metadata) 
+         VALUES ($1, 'withdraw', $2, $3, $4, $5)`,
+        [userId, -refundAmount, `Отмена возврата по заказу #${orderId}`, orderId, 
+         JSON.stringify({ 
+           cancel_refund: true,
+           spent: Math.min(refundAmount, currentBalance),
+           remaining_debt: Math.max(0, refundAmount - currentBalance)
+         })]
+      );
+      
+      if (refundAmount > currentBalance) {
+        const debtAmount = refundAmount - currentBalance;
+        await client.query(
+          `INSERT INTO wallet_transactions 
+           (user_id, type, amount, description, order_id, metadata) 
+           VALUES ($1, 'debt', $2, $3, $4, $5)`,
+          [userId, -debtAmount, `Задолженность по отмене возврата #${orderId}`, orderId,
+           JSON.stringify({ 
+             debt: true,
+             original_refund: refundAmount,
+             remaining: debtAmount
+           })]
+        );
+      }
+      
+      await client.query('COMMIT');
+      
+      let debtText = '';
+      if (refundAmount > currentBalance) {
+        const debtAmount = refundAmount - currentBalance;
+        debtText = `\n\n⚠️ На балансе недостаточно средств!\n` +
+          `💰 Списано: ${formatRub(currentBalance)} DCoin\n` +
+          `📉 Задолженность: ${formatRub(debtAmount)} DCoin\n` +
+          `💳 При пополнении баланса задолженность будет списана автоматически.`;
+      }
+      
+      const successText = `✅ Возврат отменен!\n\n` +
+        `📦 Заказ: #${orderId}\n` +
+        `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
+        `💎 Списано с DCoin баланса: ${formatRub(Math.min(refundAmount, currentBalance))} DCoin` +
+        debtText;
+      
+      await adminBot.editMessageText(successText, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      try {
+        const userResult = await client.query(
+          'SELECT tg_id FROM users WHERE id = $1',
+          [userId]
+        );
+        
+        if (userResult.rows.length > 0) {
+          const userTgId = userResult.rows[0].tg_id;
+          
+          let userMessage = `⚠️ Возврат по заказу #${orderId} отменен администратором.\n\n` +
+            `💰 Сумма возврата: ${formatRub(refundAmount)} RUB\n` +
+            `💎 Списано с вашего DCoin баланса: ${formatRub(Math.min(refundAmount, currentBalance))} DCoin`;
+          
+          if (refundAmount > currentBalance) {
+            const debtAmount = refundAmount - currentBalance;
+            userMessage += `\n\n⚠️ На вашем балансе недостаточно средств!\n` +
+              `💰 Списано: ${formatRub(currentBalance)} DCoin\n` +
+              `📉 Задолженность: ${formatRub(debtAmount)} DCoin\n` +
+              `💳 При следующем пополнении баланса задолженность будет списана автоматически.`;
+          }
+          
+          await userBot.sendMessage(userTgId, userMessage);
+        }
+      } catch (notifyError) {
+        console.error('Ошибка уведомления пользователя:', notifyError);
+      }
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: refundAmount > currentBalance ? '⚠️ Возврат отменен, но есть задолженность' : '✅ Возврат отменен',
+        show_alert: false
+      });
+      
+      setTimeout(async () => {
+        await showOrderDetails(chatId, messageId, orderId, returnPage);
+      }, 2000);
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('❌ Ошибка подтверждения отмены возврата:', error);
+      
+      await adminBot.editMessageText('❌ Ошибка при отмене возврата. Баланс пользователя не изменен.', {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    } finally {
+      client.release();
+    }
     return;
   }
 
+  // ===== ТОВАРЫ =====
   if (data === 'add_product_prompt') {
     await adminBot.answerCallbackQuery(cb.id);
     adminBot.sendMessage(chatId, '📝 Отправьте команду /add_product чтобы начать добавление товара');
@@ -2013,58 +3093,240 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data === 'edit_price_list') {
-    await handleEditPriceList(cb.message, cb.id);
+    try {
+      const result = await pool.query(
+        'SELECT id, name, price FROM products ORDER BY name'
+      );
+      
+      if (result.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { text: '📭 Нет товаров для изменения цены' });
+        return;
+      }
+      
+      const keyboard = {
+        inline_keyboard: result.rows.map(product => [
+          { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `edit_price:${product.id}` }
+        ])
+      };
+      
+      await adminBot.editMessageText('💰 Выберите товар для изменения цены:', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: keyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (error) {
+      console.error('❌ Ошибка получения списка товаров:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при получении списка товаров',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('edit_price:')) {
     const productId = data.split(':')[1];
-    await handleEditPrice(productId, cb.message, cb.id);
+    
+    try {
+      const productResult = await pool.query(
+        'SELECT name, price FROM products WHERE id = $1',
+        [productId]
+      );
+      
+      if (productResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Товар не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const product = productResult.rows[0];
+      
+      userStates[chatId] = {
+        action: 'edit_price',
+        step: 'awaiting_new_price',
+        productId: productId,
+        productName: product.name,
+        oldPrice: product.price
+      };
+      
+      const infoText = `💰 Изменение цены товара\n\n🏷️ Товар: ${product.name}\n🆔 ID: ${productId}\n💰 Текущая цена: ${formatRub(product.price)}\n\nВведите новую цену (в рублях, только цифры):`;
+      
+      await adminBot.editMessageText(infoText, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: 'Введите новую цену',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка выбора товара для изменения цены:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data === 'delete_product_list') {
-    await handleDeleteProductList(cb.message, cb.id);
+    try {
+      const result = await pool.query(
+        'SELECT id, name, price FROM products ORDER BY name'
+      );
+      
+      if (result.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { text: '📭 Нет товаров для удаления' });
+        return;
+      }
+      
+      const keyboard = {
+        inline_keyboard: result.rows.map(product => [
+          { text: `${product.name} - ${formatRub(product.price)}`, callback_data: `delete_product:${product.id}` }
+        ])
+      };
+      
+      await adminBot.editMessageText('🗑️ Выберите товар для удаления:', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: keyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (error) {
+      console.error('❌ Ошибка получения списка товаров:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при получении списка товаров',
+        show_alert: true 
+      });
+    }
     return;
   }
 
   if (data.startsWith('delete_product:')) {
     const productId = data.split(':')[1];
-    await handleDeleteProduct(productId, cb.message, cb.id);
+    
+    try {
+      const productResult = await pool.query(
+        'SELECT name, price FROM products WHERE id = $1',
+        [productId]
+      );
+      
+      if (productResult.rows.length === 0) {
+        await adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Товар не найден',
+          show_alert: true 
+        });
+        return;
+      }
+      
+      const product = productResult.rows[0];
+      await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+      
+      const successText = `🗑️ Товар удален!\n\nНазвание: ${product.name}\nЦена: ${formatRub(product.price)}\nID: ${productId}`;
+      
+      await adminBot.editMessageText(successText, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Товар удален',
+        show_alert: false
+      });
+    } catch (error) {
+      console.error('❌ Ошибка удаления товара:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка при удалении товара',
+        show_alert: true 
+      });
+    }
     return;
   }
 
+  // ===== ВЫБОР ТИПА ТОВАРА (ПОДАРОК/НЕ ПОДАРОК) =====
+  if (data.startsWith('set_gift:')) {
+    const isGift = data.split(':')[1];
+    const userState = userStates[chatId];
+    
+    if (!userState || userState.step !== 'awaiting_gift') {
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Сессия устарела. Начните заново командой /add_product',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    try {
+      const is_gift = isGift === '1';
+      userState.productData.is_gift = is_gift;
+      
+      const timestamp = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const id = `prod_${timestamp}_${randomString}`;
+      
+      const { name, price, image_url } = userState.productData;
+      
+      await pool.query(
+        'INSERT INTO products (id, name, price, image_url, is_gift) VALUES ($1, $2, $3, $4, $5)',
+        [id, name, price, image_url, is_gift]
+      );
+      
+      const successText = `🎉 Товар успешно добавлен!\n\n` +
+        `📝 Информация о товаре:\n` +
+        `🆔 ID: \`${id}\`\n` +
+        `🏷️ Название: ${name}\n` +
+        `💰 Цена: ${formatRub(price)}\n` +
+        `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+        `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
+      
+      delete userStates[chatId];
+      
+      await adminBot.editMessageText(successText, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Товар добавлен!',
+        show_alert: false
+      });
+      
+      await adminBot.sendMessage(
+        chatId,
+        `✅ Товар *${name}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
+        { parse_mode: 'Markdown' }
+      );
+      
+    } catch (error) {
+      console.error('❌ Ошибка сохранения товара:', error);
+      delete userStates[chatId];
+      
+      await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка сохранения',
+        show_alert: true
+      });
+    }
+    return;
+  }
+
+  // ===== НЕИЗВЕСТНАЯ КОМАНДА =====
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
     show_alert: true
   });
 });
-
-async function showFilterOptions(msg, callbackQueryId) {
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: '📅 Сегодня', callback_data: 'filter_date:today' },
-        { text: '📅 Вчера', callback_data: 'filter_date:yesterday' }
-      ],
-      [
-        { text: '📅 Эта неделя', callback_data: 'filter_date:week' },
-        { text: '📅 Этот месяц', callback_data: 'filter_date:month' }
-      ],
-      [
-        { text: '👤 По ID пользователя', callback_data: 'filter_user_prompt' }
-      ],
-      [
-        { text: '❌ Сбросить фильтр', callback_data: 'clear_filters' }
-      ]
-    ]
-  };
-  
-  await adminBot.editMessageText('🔍 Выберите тип фильтрации:', {
-    chat_id: msg.chat.id,
-    message_id: msg.message_id,
-    reply_markup: keyboard
-  });
   
   await adminBot.answerCallbackQuery(callbackQueryId);
 }
