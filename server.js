@@ -157,7 +157,7 @@ passport.use('yandex', new OAuth2Strategy({
     }
   }
 ));
-app.get('/api/auth/yandex', passport.authenticate('yandex'));\
+app.get('/api/auth/yandex', passport.authenticate('yandex'));
 
 app.get('/api/auth/yandex/callback',
   (req, res, next) => {
