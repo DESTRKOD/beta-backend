@@ -3328,8 +3328,7 @@ adminBot.on('callback_query', async (cb) => {
   });
 });
   
-  await adminBot.answerCallbackQuery(callbackQueryId);
-}
+
 
 async function handleDateFilter(msg, filterType, callbackQueryId) {
   const chatId = msg.chat.id;
