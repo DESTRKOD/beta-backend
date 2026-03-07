@@ -43,6 +43,42 @@ app.use(session({
   }
 }));
 
+// ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
+app.use((req, res, next) => {
+  // Список путей, которые доступны во время техперерыва
+  const allowedPaths = [
+    '/working.html',
+    '/api/maintenance-status',
+    '/favicon.ico',
+    '/ping',
+    '/health',
+    '/status',
+    '/wakeup'
+  ];
+  
+  // Проверяем, является ли запрос API и относится ли он к техперерыву
+  if (req.path.startsWith('/api/maintenance-status')) {
+    return next();
+  }
+  
+  // Если техперерыв активен и путь не в белом списке
+  if (isMaintenanceActive() && !allowedPaths.includes(req.path) && !req.path.startsWith('/api/')) {
+    // Для API запросов возвращаем JSON
+    if (req.path.startsWith('/api/')) {
+      return res.status(503).json({ 
+        success: false, 
+        error: 'maintenance',
+        message: 'Технический перерыв',
+        endTime: maintenanceMode.endTime
+      });
+    }
+    // Для HTML страниц редиректим на working.html
+    return res.redirect('/working.html');
+  }
+  
+  next();
+});
+
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -234,6 +270,47 @@ app.get('/api/auth/yandex/callback',
     })(req, res, next);
   }
 );
+
+// ===== ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
+let maintenanceMode = {
+  active: false,
+  endTime: null, // timestamp окончания
+  duration: 0, // длительность в минутах
+  startedAt: null // timestamp начала
+};
+
+// Функция для форматирования времени
+function formatMaintenanceTime(minutes) {
+  if (minutes < 60) {
+    return `${minutes} мин`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (mins === 0) {
+    return `${hours} ${getHoursWord(hours)}`;
+  }
+  return `${hours} ${getHoursWord(hours)} ${mins} мин`;
+}
+
+function getHoursWord(hours) {
+  if (hours % 10 === 1 && hours % 100 !== 11) return 'час';
+  if ([2,3,4].includes(hours % 10) && ![12,13,14].includes(hours % 100)) return 'часа';
+  return 'часов';
+}
+
+// Проверка активен ли техперерыв
+function isMaintenanceActive() {
+  if (!maintenanceMode.active) return false;
+  if (maintenanceMode.endTime && Date.now() > maintenanceMode.endTime) {
+    // Автоматически отключаем, если время вышло
+    maintenanceMode.active = false;
+    maintenanceMode.endTime = null;
+    maintenanceMode.duration = 0;
+    maintenanceMode.startedAt = null;
+    return false;
+  }
+  return maintenanceMode.active;
+}
 
 let adminBot;
 let userBot;
@@ -479,6 +556,25 @@ app.get('/wakeup', (req, res) => {
     status: 'awake', 
     time: new Date().toISOString()
   });
+});
+
+// ===== API ДЛЯ ПРОВЕРКИ СТАТУСА ТЕХПЕРЕРЫВА =====
+app.get('/api/maintenance-status', (req, res) => {
+  if (isMaintenanceActive()) {
+    const timeLeft = maintenanceMode.endTime ? Math.max(0, maintenanceMode.endTime - Date.now()) : 0;
+    res.json({
+      maintenance: true,
+      endTime: maintenanceMode.endTime,
+      timeLeft: timeLeft,
+      endTimeFormatted: maintenanceMode.endTime ? new Date(maintenanceMode.endTime).toLocaleTimeString('ru-RU') : null,
+      duration: maintenanceMode.duration,
+      startedAt: maintenanceMode.startedAt
+    });
+  } else {
+    res.json({
+      maintenance: false
+    });
+  }
 });
 
 app.get('/ping', (req, res) => {
@@ -827,6 +923,48 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 });
 
 
+
+// ===== КОМАНДА /working - ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
+adminBot.onText(/\/working/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  if (maintenanceMode.active) {
+    // Если перерыв уже активен, показываем кнопку завершения
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '🔧 Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
+      ]
+    };
+    
+    const endTime = maintenanceMode.endTime ? new Date(maintenanceMode.endTime).toLocaleTimeString('ru-RU') : 'неизвестно';
+    const duration = formatMaintenanceTime(maintenanceMode.duration);
+    
+    await adminBot.sendMessage(
+      chatId,
+      `🔧 *Технический перерыв активен*\n\n` +
+      `⏱ Длительность: ${duration}\n` +
+      `⏰ Окончание: ${endTime}\n\n` +
+      `Используйте кнопку ниже для завершения.`,
+      { 
+        parse_mode: 'Markdown',
+        reply_markup: keyboard 
+      }
+    );
+    return;
+  }
+  
+  // Запрашиваем время
+  userStates[chatId] = { action: 'maintenance_duration' };
+  await adminBot.sendMessage(
+    chatId,
+    '🔧 *Настройка технического перерыва*\n\nВведите длительность в минутах:',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+
 userBot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
   
@@ -974,6 +1112,9 @@ userBot.onText(/\/orders/, async (msg) => {
   }
 });
 
+
+
+
 async function getBotUsername() {
   try {
     if (USER_BOT_USERNAME) {
@@ -1019,6 +1160,46 @@ function getStatusText(status) {
   };
   return statusMap[status] || status;
 }
+
+
+// ===== КОМАНДА /status - СТАТУС МАГАЗИНА =====
+adminBot.onText(/\/status/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  if (maintenanceMode.active) {
+    const endTime = maintenanceMode.endTime ? new Date(maintenanceMode.endTime).toLocaleTimeString('ru-RU') : 'неизвестно';
+    const duration = formatMaintenanceTime(maintenanceMode.duration);
+    const timeLeft = Math.round((maintenanceMode.endTime - Date.now()) / 60000);
+    const timeLeftStr = timeLeft > 0 ? formatMaintenanceTime(timeLeft) : 'менее минуты';
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '🔧 Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
+      ]
+    };
+    
+    await adminBot.sendMessage(
+      chatId,
+      `📊 *Статус магазина*\n\n` +
+      `🔧 *Технический перерыв АКТИВЕН*\n\n` +
+      `⏱ Длительность: ${duration}\n` +
+      `⏰ Осталось: ${timeLeftStr}\n` +
+      `⏰ Окончание: ${endTime}`,
+      { 
+        parse_mode: 'Markdown',
+        reply_markup: keyboard 
+      }
+    );
+  } else {
+    await adminBot.sendMessage(
+      chatId,
+      `📊 *Статус магазина*\n\n✅ Магазин работает в обычном режиме`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+});
 
 adminBot.onText(/\/start/, async (msg) => {
   if (!isAdmin(msg)) {
@@ -1188,6 +1369,8 @@ adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
       }
       
       await client.query('COMMIT');
+
+      
       
       let successText = `✅ Баланс пользователя пополнен!\n\n` +
         `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
@@ -1698,7 +1881,57 @@ adminBot.on('message', async (msg) => {
     }
     return;
   }
+
+
   
+  else if (userState.action === 'maintenance_duration') {
+    const minutes = parseInt(text);
+    
+    if (isNaN(minutes) || minutes < 1 || minutes > 1440) { // максимум 24 часа
+      adminBot.sendMessage(chatId, '❌ Введите корректное число минут (от 1 до 1440)');
+      return;
+    }
+    
+    const duration = minutes;
+    const endTime = Date.now() + minutes * 60 * 1000;
+    
+    maintenanceMode = {
+      active: true,
+      endTime: endTime,
+      duration: duration,
+      startedAt: Date.now()
+    };
+    
+    const formattedDuration = formatMaintenanceTime(duration);
+    const endTimeStr = new Date(endTime).toLocaleTimeString('ru-RU');
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '✅ Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
+      ]
+    };
+    
+    await adminBot.sendMessage(
+      chatId,
+      `🔧 *Технический перерыв запущен*\n\n` +
+      `⏱ Длительность: ${formattedDuration}\n` +
+      `⏰ Окончание: ${endTimeStr}\n\n` +
+      `Все пользователи будут перенаправлены на страницу working.html`,
+      { 
+        parse_mode: 'Markdown',
+        reply_markup: keyboard 
+      }
+    );
+    
+    // Уведомление админу (опционально)
+    await adminBot.sendMessage(
+      ADMIN_ID,
+      `🔧 *Технический перерыв активирован*\n\nАдминистратор запустил техперерыв на ${formattedDuration}.`
+    );
+    
+    delete userStates[chatId];
+    return;
+  }  
   else if (userState.action === 'filter_user_id') {
     const userId = parseInt(text);
     
@@ -2179,6 +2412,62 @@ adminBot.on('callback_query', async (cb) => {
         show_alert: true 
       });
     }
+    return;
+  }
+
+
+
+    // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (ПОДТВЕРЖДЕНИЕ) =====
+  if (data === 'maintenance_end_confirm') {
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Да, завершить', callback_data: 'maintenance_end_yes' },
+          { text: '❌ Нет, оставить', callback_data: 'maintenance_end_no' }
+        ]
+      ]
+    };
+    
+    await adminBot.editMessageText(
+      '⚠️ *Вы уверены, что хотите завершить технический перерыв?*',
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (ДА) =====
+  if (data === 'maintenance_end_yes') {
+    maintenanceMode = {
+      active: false,
+      endTime: null,
+      duration: 0,
+      startedAt: null
+    };
+    
+    await adminBot.editMessageText(
+      '✅ *Технический перерыв завершен*\n\nМагазин снова работает в обычном режиме.',
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (НЕТ) =====
+  if (data === 'maintenance_end_no') {
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
 
