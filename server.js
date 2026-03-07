@@ -53,7 +53,10 @@ app.use((req, res, next) => {
     '/ping',
     '/health',
     '/status',
-    '/wakeup'
+    '/wakeup',
+    '/api/auth/check/',  // для проверки авторизации
+    '/api/auth/profile',  // для получения профиля
+    '/api/user/'         // для работы с пользователями
   ];
   
   // Проверяем, является ли запрос API и относится ли он к техперерыву
@@ -61,8 +64,12 @@ app.use((req, res, next) => {
     return next();
   }
   
-  // Если техперерыв активен и путь не в белом списке
-  if (isMaintenanceActive() && !allowedPaths.includes(req.path) && !req.path.startsWith('/api/')) {
+ 
+  // Проще добавить секретный параметр для админа
+  const isAdminRequest = req.query.admin_bypass === process.env.ADMIN_BYPASS_KEY;
+  
+  // Если техперерыв активен и путь не в белом списке и это не админ
+  if (isMaintenanceActive() && !allowedPaths.some(path => req.path.startsWith(path)) && !isAdminRequest) {
     // Для API запросов возвращаем JSON
     if (req.path.startsWith('/api/')) {
       return res.status(503).json({ 
