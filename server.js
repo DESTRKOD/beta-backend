@@ -1752,64 +1752,70 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data.startsWith('support_view:')) {
-    const dialogId = parseInt(data.split(':')[1]);
+  const dialogId = parseInt(data.split(':')[1]);
 
-    try {
-      const dialogRes = await pool.query(`
-        SELECT d.*, u.username, u.tg_id, u.first_name, u.last_name
-        FROM support_dialogs d
-        JOIN users u ON d.user_id = u.id
-        WHERE d.id = $1
-      `, [dialogId]);
+  try {
+    const dialogRes = await pool.query(`
+      SELECT d.*, u.username, u.tg_id, u.first_name, u.last_name
+      FROM support_dialogs d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.id = $1
+    `, [dialogId]);
 
-      if (dialogRes.rows.length === 0) {
-        return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
-      }
-
-      const dialog = dialogRes.rows[0];
-
-      const msgs = await pool.query(`
-        SELECT sender, message, metadata, created_at
-        FROM support_messages
-        WHERE dialog_id = $1
-        ORDER BY created_at ASC
-      `, [dialogId]);
-
-      let text = `💬 Диалог #${dialogId}\n\n`;
-      text += `👤 ${dialog.username || dialog.tg_id || 'Аноним'}\n`;
-      text += `Статус: ${dialog.status === 'active' ? '🟢 Активен' : '🔴 Закрыт'}\n`;
-      text += `Сообщений: ${msgs.rows.length}\n\n────────────────────\n`;
-
-      msgs.rows.forEach(m => {
-        const sender = m.sender === 'user' ? '👤' : '🛠️';
-        text += `${sender} ${new Date(m.created_at).toLocaleString('ru-RU')}\n`;
-        if (m.metadata?.file) {
-          text += m.metadata.file.isImage ? `[Фото: ${m.metadata.file.name}]\n` : `[Файл: ${m.metadata.file.name}]\n`;
-        } else {
-          text += `${m.message || '[без текста]'}\n`;
-        }
-        text += '────────────────────\n';
-      });
-
-      const kb = {
-        inline_keyboard: [
-          [
-            { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
-            { text: dialog.status === 'active' ? '🔒 Закрыть' : '🔓 Открыть', callback_data: `support_toggle:${dialogId}` }
-          ],
-          [{ text: '← Назад к списку', callback_data: 'dialogs_all' }]
-        ]
-      };
-
-      await adminBot.sendMessage(chatId, text, { reply_markup: kb });
-      await adminBot.deleteMessage(chatId, messageId);
-      await adminBot.answerCallbackQuery(cb.id);
-    } catch (err) {
-      console.error('Ошибка при открытии диалога:', err);
-      await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка загрузки диалога', show_alert: true });
+    if (dialogRes.rows.length === 0) {
+      return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
     }
-    return;
+
+    const dialog = dialogRes.rows[0];
+
+    const msgs = await pool.query(`
+      SELECT sender, message, metadata, created_at
+      FROM support_messages
+      WHERE dialog_id = $1
+      ORDER BY created_at ASC
+    `, [dialogId]);
+
+    let text = `💬 Диалог #${dialogId}\n\n`;
+    text += `👤 Пользователь ID: \`${dialog.user_id}\`\n`;
+    if (dialog.username) {
+      text += `   Имя: ${dialog.username}\n`;
+    }
+    if (dialog.tg_id) {
+      text += `   TG: \`${dialog.tg_id}\`\n`;
+    }
+    text += `Статус: ${dialog.status === 'active' ? '🟢 Активен' : '🔴 Закрыт'}\n`;
+    text += `Сообщений: ${msgs.rows.length}\n\n────────────────────\n`;
+
+    msgs.rows.forEach(m => {
+      const sender = m.sender === 'user' ? '👤' : '🛠️';
+      text += `${sender} ${new Date(m.created_at).toLocaleString('ru-RU')}\n`;
+      if (m.metadata?.file) {
+        text += m.metadata.file.isImage ? `[Фото: ${m.metadata.file.name}]\n` : `[Файл: ${m.metadata.file.name}]\n`;
+      } else {
+        text += `${m.message || '[без текста]'}\n`;
+      }
+      text += '────────────────────\n';
+    });
+
+    const kb = {
+      inline_keyboard: [
+        [
+          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+          { text: dialog.status === 'active' ? '🔒 Закрыть' : '🔓 Открыть', callback_data: `support_toggle:${dialogId}` }
+        ],
+        [{ text: '← Назад к списку', callback_data: 'dialogs_all' }]
+      ]
+    };
+
+    await adminBot.sendMessage(chatId, text, { reply_markup: kb });
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+  } catch (err) {
+    console.error('Ошибка при открытии диалога:', err);
+    await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка загрузки диалога', show_alert: true });
   }
+  return;
+}
 
   if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -1937,7 +1943,7 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  if (data.startsWith('support_userinfo:')) {
+  if (data.startsWith(':')) {
     const userId = parseInt(data.split(':')[1]);
     
     try {
@@ -1983,6 +1989,24 @@ adminBot.on('callback_query', async (cb) => {
         show_alert: true 
       });
     }
+    return;
+  }
+
+    // ===== ПАГИНАЦИЯ ДЛЯ /users =====
+  if (data.startsWith('users_page:')) {
+    const page = data.split(':')[1];
+    
+    // Эмулируем команду /users с номером страницы
+    const fakeMsg = { 
+      ...cb.message, 
+      text: `/users ${page}`, 
+      chat: { id: chatId },
+      from: { id: ADMIN_ID }
+    };
+    
+    await adminBot.emit('text', fakeMsg);
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
 
@@ -3575,6 +3599,106 @@ adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
   } catch (err) {
     console.error('Ошибка /dialogs:', err);
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка загрузки диалогов');
+  }
+});
+
+// ===== КОМАНДА /users - СПИСОК ПОЛЬЗОВАТЕЛЕЙ =====
+adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  const page = match[1] ? parseInt(match[1]) : 1;
+  const limit = 15;
+  const offset = (page - 1) * limit;
+  
+  try {
+    // Получаем общее количество пользователей
+    const countResult = await pool.query('SELECT COUNT(*) as total FROM users');
+    const totalUsers = parseInt(countResult.rows[0].total);
+    const totalPages = Math.ceil(totalUsers / limit);
+    
+    if (totalUsers === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет зарегистрированных пользователей');
+    }
+    
+    // Получаем пользователей с пагинацией
+    const result = await pool.query(`
+      SELECT 
+        id, 
+        username, 
+        COALESCE(tg_id, 0) as tg_id,
+        auth_provider,
+        created_at,
+        last_login,
+        (SELECT COUNT(*) FROM orders WHERE user_id = users.id) as orders_count
+      FROM users 
+      ORDER BY created_at DESC 
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
+    
+    let text = `👥 *Список пользователей* (страница ${page}/${totalPages})\n\n`;
+    
+    const inlineKeyboard = [];
+    
+    result.rows.forEach((user, index) => {
+      const userNumber = offset + index + 1;
+      
+      // Определяем иконку провайдера
+      let providerIcon = '📧';
+      if (user.auth_provider === 'telegram') providerIcon = '📱';
+      else if (user.auth_provider === 'yandex') providerIcon = 'Я';
+      else if (user.auth_provider === 'yandex+telegram') providerIcon = '🔗';
+      
+      // Форматируем дату
+      const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
+      
+      // Определяем отображаемое имя
+      let displayName = user.username || 'Без имени';
+      if (displayName.length > 20) {
+        displayName = displayName.substring(0, 17) + '...';
+      }
+      
+      text += `${userNumber}. ${providerIcon} *${displayName}*\n`;
+      text += `   🆔 ID: \`${user.id}\`\n`;
+      text += `   📱 TG ID: ${user.tg_id !== 0 ? '`' + user.tg_id + '`' : '—'}\n`;
+      text += `   📦 Заказов: ${user.orders_count}\n`;
+      text += `   📅 Регистрация: ${createdDate}\n\n`;
+      
+      // Добавляем кнопку для просмотра деталей
+      inlineKeyboard.push([
+        { text: `👤 Пользователь #${user.id}`, callback_data: `support_userinfo:${user.id}` }
+      ]);
+    });
+    
+    // Кнопки пагинации
+    const paginationButtons = [];
+    if (page > 1) {
+      paginationButtons.push({ text: '⬅️ Назад', callback_data: `users_page:${page-1}` });
+    }
+    if (page < totalPages) {
+      paginationButtons.push({ text: '➡️ Вперед', callback_data: `users_page:${page+1}` });
+    }
+    if (paginationButtons.length > 0) {
+      inlineKeyboard.push(paginationButtons);
+    }
+    
+    // Кнопка для обновления
+    inlineKeyboard.push([
+      { text: '🔄 Обновить', callback_data: `users_page:${page}` }
+    ]);
+    
+    const keyboard = {
+      inline_keyboard: inlineKeyboard
+    };
+    
+    await adminBot.sendMessage(chatId, text, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения списка пользователей:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при получении списка пользователей');
   }
 });
 
