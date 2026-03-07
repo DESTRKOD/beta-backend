@@ -1720,9 +1720,199 @@ adminBot.on('message', async (msg) => {
     await handleEditPriceStep(msg, userState);
     return;
   }
+
+    else if (userState.action === 'addbalance') {
+    const amount = parseInt(text);
+    const userId = userState.userId;
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
+      return;
+    }
+    
+    // Получаем информацию о пользователе
+    const userResult = await pool.query(
+      'SELECT id, tg_id, username FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      adminBot.sendMessage(chatId, '❌ Пользователь не найден');
+      delete userStates[chatId];
+      return;
+    }
+    
+    const user = userResult.rows[0];
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      await client.query(
+        `INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) 
+         VALUES ($1, 0, 0, 0) 
+         ON CONFLICT (user_id) DO NOTHING`,
+        [user.id]
+      );
+      
+      const debtResult = await client.query(
+        `SELECT SUM(ABS(amount)) as total_debt 
+         FROM wallet_transactions 
+         WHERE user_id = $1 AND type = 'debt'`,
+        [user.id]
+      );
+      
+      const totalDebt = debtResult.rows[0]?.total_debt || 0;
+      
+      let remainingAmount = amount;
+      let debtPaid = 0;
+      
+      if (totalDebt > 0) {
+        const debtTransactions = await client.query(
+          `SELECT id, amount, order_id, metadata 
+           FROM wallet_transactions 
+           WHERE user_id = $1 AND type = 'debt'
+           ORDER BY created_at ASC`,
+          [user.id]
+        );
+        
+        for (const debt of debtTransactions.rows) {
+          if (remainingAmount <= 0) break;
+          
+          const debtAmount = Math.abs(debt.amount);
+          const payAmount = Math.min(debtAmount, remainingAmount);
+          
+          await client.query(
+            `UPDATE wallet_transactions 
+             SET amount = amount + $1, 
+                 metadata = jsonb_set(
+                   COALESCE(metadata, '{}'), 
+                   '{paid}', 
+                   to_jsonb(COALESCE((metadata->>'paid')::int, 0) + $2)
+                 )
+             WHERE id = $3`,
+            [payAmount, payAmount, debt.id]
+          );
+          
+          if (payAmount >= debtAmount) {
+            await client.query(
+              `UPDATE wallet_transactions 
+               SET type = 'debt_paid',
+                   metadata = metadata || '{"fully_paid": true}'
+               WHERE id = $1`,
+              [debt.id]
+            );
+          }
+          
+          debtPaid += payAmount;
+          remainingAmount -= payAmount;
+        }
+        
+        if (debtPaid > 0) {
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, metadata) 
+             VALUES ($1, 'debt_payment', $2, $3, $4)`,
+            [user.id, -debtPaid, `Автоматическое погашение задолженности`, 
+             JSON.stringify({ auto_paid: true, amount: debtPaid })]
+          );
+        }
+      }
+      
+      if (remainingAmount > 0) {
+        await client.query(
+          'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
+          [remainingAmount, user.id]
+        );
+        
+        await client.query(
+          `INSERT INTO wallet_transactions 
+           (user_id, type, amount, description, metadata) 
+           VALUES ($1, 'deposit', $2, $3, $4)`,
+          [user.id, remainingAmount, `Пополнение баланса администратором`, 
+           JSON.stringify({ admin: true, after_debt: true })]
+        );
+      }
+      
+      await client.query('COMMIT');
+      
+      let successText = `✅ Баланс пользователя пополнен!\n\n` +
+        `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
+        `🆔 ID: ${user.id}\n` +
+        `📱 TG ID: ${user.tg_id || 'не привязан'}\n` +
+        `💰 Сумма пополнения: ${formatRub(amount)}\n`;
+      
+      if (debtPaid > 0) {
+        successText += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+      }
+      
+      if (remainingAmount > 0) {
+        successText += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n`;
+      } else {
+        successText += `⚠️ Вся сумма ушла на погашение задолженности\n`;
+      }
+      
+      adminBot.sendMessage(chatId, successText);
+      
+      if (user.tg_id) {
+        try {
+          let userMessage = `💰 Ваш баланс пополнен!\n\n`;
+          
+          if (debtPaid > 0) {
+            userMessage += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+          }
+          
+          if (remainingAmount > 0) {
+            userMessage += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n\n`;
+          } else {
+            userMessage += `⚠️ Вся сумма ушла на погашение задолженности\n\n`;
+          }
+          
+          userMessage += `👉 Проверьте свой баланс в разделе "Кошелёк"`;
+          
+          await userBot.sendMessage(user.tg_id, userMessage);
+        } catch (notifyError) {
+          console.error('Ошибка уведомления пользователя:', notifyError);
+        }
+      }
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('❌ Ошибка пополнения баланса:', error);
+      adminBot.sendMessage(chatId, '❌ Ошибка при пополнении баланса');
+    } finally {
+      client.release();
+    }
+    
+    delete userStates[chatId];
+    return;
+  }
   
   else if (userState.action === 'process_refund') {
     await handleRefundStep(msg, userState);
+    return;
+  }
+
+    else if (userState.action === 'addbalance') {
+    const amount = parseInt(text);
+    const userId = userState.userId;
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
+      return;
+    }
+    
+    // Эмулируем команду /addbalance
+    const fakeMsg = { 
+      ...msg, 
+      text: `/addbalance ${userId} ${amount}`,
+      chat: { id: chatId },
+      from: { id: ADMIN_ID }
+    };
+    
+    delete userStates[chatId];
+    await adminBot.emit('text', fakeMsg);
     return;
   }
   
@@ -2018,6 +2208,255 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
+    // ===== ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ =====
+  if (data.startsWith('support_userinfo:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const userResult = await pool.query(`
+        SELECT u.*, 
+               (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as orders_count,
+               (SELECT SUM(total) FROM orders WHERE user_id = u.id AND payment_status = 'confirmed') as total_spent,
+               (SELECT COUNT(*) FROM support_dialogs WHERE user_id = u.id) as dialogs_count
+        FROM users u
+        WHERE u.id = $1
+      `, [userId]);
+      
+      if (userResult.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Пользователь не найден',
+          show_alert: true 
+        });
+      }
+      
+      const user = userResult.rows[0];
+      
+      let infoText = `👤 **Информация о пользователе**\n\n`;
+      infoText += `**ID в магазине:** \`${user.id}\`\n`;
+      infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
+      infoText += `**TG ID:** ${user.tg_id ? '`' + user.tg_id + '`' : 'Не привязан'}\n`;
+      infoText += `**Telegram Username:** ${user.telegram_username ? '@' + user.telegram_username : '—'}\n`;
+      infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
+      infoText += `\n\n**Провайдер:** `;
+      
+      if (user.auth_provider === 'telegram') infoText += '📱 Telegram';
+      else if (user.auth_provider === 'yandex') infoText += 'Я Яндекс';
+      else if (user.auth_provider === 'yandex+telegram') infoText += '🔗 Яндекс+Telegram';
+      else infoText += '📧 Email';
+      
+      infoText += `\n\n**Статистика:**\n`;
+      infoText += `• Заказов: ${user.orders_count || 0}\n`;
+      infoText += `• Потрачено: ${formatRub(user.total_spent || 0)}\n`;
+      infoText += `• Обращений в поддержку: ${user.dialogs_count || 0}\n`;
+      infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
+      infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
+      
+      // Кнопки действий
+      const actionKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '📦 Заказы', callback_data: `user_orders:${user.id}` },
+            { text: '💬 Диалоги', callback_data: `user_dialogs:${user.id}` }
+          ],
+          [
+            { text: '💰 Пополнить', callback_data: `addbalance_prompt:${user.id}` },
+            { text: '📊 Статистика', callback_data: `user_stats:${user.id}` }
+          ],
+          [
+            { text: '⬅️ Назад к списку', callback_data: `users_page:1` }
+          ]
+        ]
+      };
+      
+      await adminBot.sendMessage(chatId, infoText, { 
+        parse_mode: 'Markdown',
+        reply_markup: actionKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения инфо о пользователе:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
+    return;
+  }
+      // ===== ЗАКАЗЫ ПОЛЬЗОВАТЕЛЯ =====
+  if (data.startsWith('user_orders:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const orders = await pool.query(`
+        SELECT order_id, total, status, created_at 
+        FROM orders 
+        WHERE user_id = $1 AND payment_status = 'confirmed'
+        ORDER BY created_at DESC 
+        LIMIT 10
+      `, [userId]);
+      
+      if (orders.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { 
+          text: '📭 У пользователя нет заказов',
+          show_alert: true 
+        });
+      }
+      
+      let text = `📦 *Заказы пользователя* \`${userId}\`\n\n`;
+      
+      orders.rows.forEach((order, index) => {
+        const date = new Date(order.created_at).toLocaleDateString('ru-RU');
+        text += `${index + 1}. #${order.order_id}\n`;
+        text += `   💰 ${formatRub(order.total)}\n`;
+        text += `   📊 ${getStatusText(order.status)}\n`;
+        text += `   📅 ${date}\n\n`;
+      });
+      
+      const backKeyboard = {
+        inline_keyboard: [[
+          { text: '⬅️ Назад к пользователю', callback_data: `support_userinfo:${userId}` }
+        ]]
+      };
+      
+      await adminBot.sendMessage(chatId, text, {
+        parse_mode: 'Markdown',
+        reply_markup: backKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения заказов:', error);
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+    }
+    return;
+  }
+
+  // ===== ДИАЛОГИ ПОЛЬЗОВАТЕЛЯ =====
+  if (data.startsWith('user_dialogs:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const dialogs = await pool.query(`
+        SELECT id, status, created_at, updated_at,
+               (SELECT COUNT(*) FROM support_messages WHERE dialog_id = support_dialogs.id) as msg_count
+        FROM support_dialogs 
+        WHERE user_id = $1 
+        ORDER BY updated_at DESC
+      `, [userId]);
+      
+      if (dialogs.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { 
+          text: '💬 У пользователя нет диалогов',
+          show_alert: true 
+        });
+      }
+      
+      let text = `💬 *Диалоги пользователя* \`${userId}\`\n\n`;
+      
+      dialogs.rows.forEach((dialog, index) => {
+        const created = new Date(dialog.created_at).toLocaleDateString('ru-RU');
+        const updated = new Date(dialog.updated_at).toLocaleDateString('ru-RU');
+        const statusEmoji = dialog.status === 'active' ? '🟢' : '🔴';
+        
+        text += `${index + 1}. ${statusEmoji} Диалог #${dialog.id}\n`;
+        text += `   💬 Сообщений: ${dialog.msg_count}\n`;
+        text += `   📅 Создан: ${created}\n`;
+        text += `   🔄 Обновлен: ${updated}\n\n`;
+      });
+      
+      const backKeyboard = {
+        inline_keyboard: [[
+          { text: '⬅️ Назад к пользователю', callback_data: `support_userinfo:${userId}` }
+        ]]
+      };
+      
+      await adminBot.sendMessage(chatId, text, {
+        parse_mode: 'Markdown',
+        reply_markup: backKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения диалогов:', error);
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+    }
+    return;
+  }
+
+  // ===== ПОПОЛНЕНИЕ БАЛАНСА (ПРОМПТ) =====
+  if (data.startsWith('addbalance_prompt:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    userStates[chatId] = {
+      action: 'addbalance',
+      userId: userId
+    };
+    
+    await adminBot.sendMessage(chatId, 
+      `💰 *Пополнение баланса*\n\nВведите сумму для пользователя \`${userId}\` (в рублях):`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  // ===== СТАТИСТИКА ПОЛЬЗОВАТЕЛЯ =====
+  if (data.startsWith('user_stats:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const stats = await pool.query(`
+        SELECT 
+          COUNT(DISTINCT o.id) as total_orders,
+          COALESCE(SUM(o.total), 0) as total_spent,
+          COUNT(DISTINCT CASE WHEN o.status = 'completed' THEN o.id END) as completed_orders,
+          COUNT(DISTINCT CASE WHEN o.status = 'canceled' THEN o.id END) as canceled_orders,
+          COUNT(DISTINCT CASE WHEN o.status = 'manyback' THEN o.id END) as refunded_orders,
+          (SELECT COUNT(*) FROM support_dialogs WHERE user_id = $1) as total_dialogs,
+          (SELECT COUNT(*) FROM support_messages WHERE user_id = $1 AND sender = 'user') as user_messages,
+          (SELECT COUNT(*) FROM support_messages WHERE dialog_id IN (SELECT id FROM support_dialogs WHERE user_id = $1) AND sender = 'admin') as admin_messages
+        FROM orders o
+        WHERE o.user_id = $1 AND o.payment_status = 'confirmed'
+      `, [userId]);
+      
+      const s = stats.rows[0];
+      
+      let text = `📊 *Детальная статистика пользователя* \`${userId}\`\n\n`;
+      text += `**Заказы:**\n`;
+      text += `• Всего: ${s.total_orders}\n`;
+      text += `• Потрачено: ${formatRub(s.total_spent)}\n`;
+      text += `• Завершено: ${s.completed_orders}\n`;
+      text += `• Отменено: ${s.canceled_orders}\n`;
+      text += `• Возвратов: ${s.refunded_orders}\n\n`;
+      text += `**Поддержка:**\n`;
+      text += `• Диалогов: ${s.total_dialogs}\n`;
+      text += `• Сообщений от пользователя: ${s.user_messages}\n`;
+      text += `• Ответов от админа: ${s.admin_messages}`;
+      
+      const backKeyboard = {
+        inline_keyboard: [[
+          { text: '⬅️ Назад к пользователю', callback_data: `support_userinfo:${userId}` }
+        ]]
+      };
+      
+      await adminBot.sendMessage(chatId, text, {
+        parse_mode: 'Markdown',
+        reply_markup: backKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения статистики:', error);
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+    }
+    return;
+  }
   // ===== ЗАКАЗЫ И ФИЛЬТРЫ =====
   if (data.startsWith('order_detail:')) {
     const parts = data.split(':');
@@ -5497,17 +5936,18 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     );
 
     const userResult = await pool.query(
-      'SELECT username FROM users WHERE id = $1',
-      [user_id]
-    );
-    const username = userResult.rows[0]?.username || `ID ${user_id}`;
+  'SELECT username FROM users WHERE id = $1',
+  [user_id]
+);
+const username = userResult.rows[0]?.username || `ID ${user_id}`;
 
-    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 ${username}\n`;
-
-    if (message) {
-      adminMessage += `📝 ${message}\n`;
-    }
-
+let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 Пользователь ID: ${user_id}\n`;
+if (username) {
+  adminMessage += `📝 Имя: ${username}\n`;
+}
+if (message) {
+  adminMessage += `💬 ${message}\n`;
+}
     const keyboard = {
       inline_keyboard: [
         [
