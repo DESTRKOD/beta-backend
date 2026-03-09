@@ -95,32 +95,38 @@ const adminBypass = req.query.admin_bypass;
 const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
 if (isValidAdminBypass) {
-  // Явно сохраняем сессию ПЕРЕД любыми действиями
   req.session.isAdmin = true;
 
-  // Принудительно сохраняем сессию синхронно
-  await new Promise((resolve, reject) => {
-    req.session.save((err) => {
-      if (err) {
-        console.error('❌ Ошибка сохранения сессии при bypass:', err);
-        reject(err);
-      } else {
-        resolve();
-      }
-    });
+  // Сохраняем сессию синхронно (через callback)
+  req.session.save((err) => {
+    if (err) {
+      console.error('❌ Ошибка сохранения сессии при admin_bypass:', err);
+      // Можно даже вернуть ошибку пользователю, но для начала просто логируем
+    } else {
+      console.log('✅ Сессия сохранена, isAdmin = true');
+    }
+
+    // Важно: продолжаем обработку только после сохранения
+    console.log('✅ Админ авторизован через bypass | сессия сохранена');
+    console.log('Текущий путь:', req.path);
+    console.log('Сессия:', req.session);
+
+    if (req.path === '/working' || req.path === '/working.html') {
+      console.log('→ Это /working → next() без редиректа');
+      return next();
+    }
+
+    if (Object.keys(req.query).length > 0) {
+      const cleanUrl = req.path;
+      console.log(`→ Редирект на чистый путь: ${cleanUrl}`);
+      return res.redirect(302, cleanUrl);
+    }
+
+    return next();
   });
 
-  console.log('✅ Админ авторизован через bypass | сессия сохранена');
-
-  // Логируем для отладки
-  console.log('Текущий путь:', req.path);
-  console.log('Сессия после сохранения:', req.session);
-
-  // Если заходим именно на /working — сразу пропускаем
-  if (req.path === '/working' || req.path === '/working.html') {
-    console.log('→ Это страница /working → next() без редиректа');
-    return next();
-  }
+  
+}
 
   // Для остальных страниц — чистим query и редиректим (но уже с сохранённой сессией)
   if (Object.keys(req.query).length > 0) {
