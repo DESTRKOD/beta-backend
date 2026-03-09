@@ -43,6 +43,39 @@ app.use(session({
   }
 }));
 
+
+// ===== ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
+let maintenanceMode = {
+  active: false,
+  endTime: null, // timestamp окончания
+  duration: 0, // длительность в минутах
+  startedAt: null // timestamp начала
+};
+
+// Проверка активен ли техперерыв (ТОЛЬКО по флагу, не по времени)
+function isMaintenanceActive() {
+  return maintenanceMode.active;
+}
+
+// Функция для форматирования времени без смайликов
+function formatMaintenanceTime(minutes) {
+  if (minutes < 60) {
+    return `${minutes} мин`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (mins === 0) {
+    return `${hours} ${getHoursWord(hours)}`;
+  }
+  return `${hours} ${getHoursWord(hours)} ${mins} мин`;
+}
+
+function getHoursWord(hours) {
+  if (hours % 10 === 1 && hours % 100 !== 11) return 'час';
+  if ([2,3,4].includes(hours % 10) && ![12,13,14].includes(hours % 100)) return 'часа';
+  return 'часов';
+}
+
 // ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
 app.use((req, res, next) => {
   // Список путей, которые всегда доступны
@@ -63,11 +96,9 @@ app.use((req, res, next) => {
 
   // Если это админ с правильным ключом
   if (isValidAdminBypass) {
-    // Сохраняем в сессию
     req.session.isAdmin = true;
     console.log('✅ Админ авторизован через bypass');
     
-    // Если есть параметр в URL, делаем редирект на тот же путь без параметра
     if (Object.keys(req.query).length > 0) {
       const url = req.path;
       return res.redirect(url);
@@ -89,7 +120,7 @@ app.use((req, res, next) => {
     return next();
   }
 
-  // ТЕХПЕРЕРЫВ АКТИВЕН - проверяем пути
+  // ТЕХПЕРЕРЫВ АКТИВЕН
   console.log('🔧 Техперерыв активен, проверяем путь:', req.path);
 
   // Пропускаем разрешенные пути
@@ -100,7 +131,6 @@ app.use((req, res, next) => {
 
   // Для API запросов
   if (req.path.startsWith('/api/')) {
-    // Кроме запросов на проверку статуса
     if (req.path === '/api/maintenance-status') {
       return next();
     }
@@ -114,7 +144,7 @@ app.use((req, res, next) => {
 
   // Для HTML страниц - редирект на working
   console.log('🚫 Редирект на working');
-  res.redirect('/working');
+  return res.redirect('/working');
 });
 app.use(passport.initialize());
 app.use(passport.session());
@@ -308,37 +338,7 @@ app.get('/api/auth/yandex/callback',
   }
 );
 
-// ===== ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
-let maintenanceMode = {
-  active: false,
-  endTime: null, // timestamp окончания
-  duration: 0, // длительность в минутах
-  startedAt: null // timestamp начала
-};
 
-// Проверка активен ли техперерыв (ТОЛЬКО по флагу, не по времени)
-function isMaintenanceActive() {
-  return maintenanceMode.active;
-}
-
-// Функция для форматирования времени без смайликов
-function formatMaintenanceTime(minutes) {
-  if (minutes < 60) {
-    return `${minutes} мин`;
-  }
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  if (mins === 0) {
-    return `${hours} ${getHoursWord(hours)}`;
-  }
-  return `${hours} ${getHoursWord(hours)} ${mins} мин`;
-}
-
-function getHoursWord(hours) {
-  if (hours % 10 === 1 && hours % 100 !== 11) return 'час';
-  if ([2,3,4].includes(hours % 10) && ![12,13,14].includes(hours % 100)) return 'часа';
-  return 'часов';
-}
 
 let adminBot;
 let userBot;
