@@ -91,20 +91,29 @@ app.use((req, res, next) => {
   ];
 
   // Проверяем параметр admin_bypass в URL
-  const adminBypass = req.query.admin_bypass;
-  const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
+const adminBypass = req.query.admin_bypass;
+const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
-  // Если это админ с правильным ключом
-  if (isValidAdminBypass) {
-    req.session.isAdmin = true;
-    console.log('✅ Админ авторизован через bypass');
-    
-    if (Object.keys(req.query).length > 0) {
-      const url = req.path;
-      return res.redirect(url);
-    }
+// Если это админ с правильным ключом
+if (isValidAdminBypass) {
+  req.session.isAdmin = true;
+  console.log('✅ Админ авторизован через bypass');
+
+  // Самое важное — НЕ редиректим, если мы уже на /working или /working.html
+  if (req.path === '/working' || req.path === '/working.html') {
+    console.log('→ Админ зашёл на /working с bypass — пропускаем без редиректа');
     return next();
   }
+
+  // Для всех остальных страниц — чистим query-параметры и продолжаем
+  if (Object.keys(req.query).length > 0) {
+    const cleanUrl = req.path;
+    console.log(`→ Редирект с очисткой параметров → ${cleanUrl}`);
+    return res.redirect(cleanUrl);
+  }
+
+  return next();
+}
 
   // Проверяем сессию админа
   if (req.session && req.session.isAdmin) {
