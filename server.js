@@ -94,22 +94,39 @@ app.use((req, res, next) => {
 const adminBypass = req.query.admin_bypass;
 const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
-// Если это админ с правильным ключом
 if (isValidAdminBypass) {
+  // Явно сохраняем сессию ПЕРЕД любыми действиями
   req.session.isAdmin = true;
-  console.log('✅ Админ авторизован через bypass');
 
-  // Самое важное — НЕ редиректим, если мы уже на /working или /working.html
+  // Принудительно сохраняем сессию синхронно
+  await new Promise((resolve, reject) => {
+    req.session.save((err) => {
+      if (err) {
+        console.error('❌ Ошибка сохранения сессии при bypass:', err);
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+
+  console.log('✅ Админ авторизован через bypass | сессия сохранена');
+
+  // Логируем для отладки
+  console.log('Текущий путь:', req.path);
+  console.log('Сессия после сохранения:', req.session);
+
+  // Если заходим именно на /working — сразу пропускаем
   if (req.path === '/working' || req.path === '/working.html') {
-    console.log('→ Админ зашёл на /working с bypass — пропускаем без редиректа');
+    console.log('→ Это страница /working → next() без редиректа');
     return next();
   }
 
-  // Для всех остальных страниц — чистим query-параметры и продолжаем
+  // Для остальных страниц — чистим query и редиректим (но уже с сохранённой сессией)
   if (Object.keys(req.query).length > 0) {
     const cleanUrl = req.path;
-    console.log(`→ Редирект с очисткой параметров → ${cleanUrl}`);
-    return res.redirect(cleanUrl);
+    console.log(`→ Редирект на чистый путь: ${cleanUrl}`);
+    return res.redirect(302, cleanUrl);
   }
 
   return next();
