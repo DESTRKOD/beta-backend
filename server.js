@@ -2166,6 +2166,15 @@ adminBot.on('message', async (msg) => {
     return;
   }
 
+    else if (userState.action === 'addbalance') {
+    const amount = parseInt(text);
+    const userId = userState.userId;
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
+      return;
+    }
+
     
     
     // Эмулируем команду /addbalance
