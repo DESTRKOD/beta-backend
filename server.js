@@ -78,7 +78,6 @@ function getHoursWord(hours) {
 
 // ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
 app.use((req, res, next) => {
-  // Список путей, которые всегда доступны даже в режиме техперерыва
   const allowedPaths = [
     '/working',
     '/working.html',
@@ -90,83 +89,70 @@ app.use((req, res, next) => {
     '/wakeup'
   ];
 
-  // 1. Проверяем секретный bypass для админа
+  // Нормализуем путь (убираем trailing slash для надёжности)
+  const normalizedPath = req.path.replace(/\/$/, '');
+
+  // Логируем каждый запрос (очень полезно для дебага)
+  console.log(`[MAINTENANCE] ${req.method} ${req.originalUrl} | path=${req.path} | query=`, req.query);
+
+  // 1. Admin bypass — самый высокий приоритет
   const adminBypass = req.query.admin_bypass;
   const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
   if (isValidAdminBypass) {
+    console.log('→ Admin bypass активирован');
     req.session.isAdmin = true;
 
-    // Сохраняем сессию и только после успешного сохранения продолжаем
     return req.session.save((err) => {
       if (err) {
-        console.error('❌ Ошибка сохранения сессии при admin_bypass:', err);
+        console.error('❌ Ошибка сохранения сессии при bypass:', err);
+        // Даже при ошибке пропускаем дальше — лучше так, чем висеть
       } else {
-        console.log('✅ Сессия сохранена → isAdmin = true');
+        console.log('→ Сессия сохранена, isAdmin = true');
       }
 
-      console.log('✅ Админ авторизован через bypass | сессия сохранена');
-      console.log('Текущий путь:', req.path);
-      console.log('Сессия:', req.session);
-
-      // Если зашли именно на /working — сразу пропускаем
-      if (req.path === '/working' || req.path === '/working.html') {
-        console.log('→ Это /working → next() без редиректа');
-        return next();
-      }
-
-      // Убираем query-параметры из URL после первого захода
+      // После bypass чистим query и пропускаем
       if (Object.keys(req.query).length > 0) {
-        const cleanUrl = req.path;
-        console.log(`→ Редирект на чистый путь: ${cleanUrl}`);
-        return res.redirect(302, cleanUrl);
+        console.log('→ Редирект без query после bypass');
+        return res.redirect(302, req.path);
       }
 
       return next();
     });
   }
 
-  // 2. Если это НЕ bypass — проверяем, есть ли уже админ-сессия
+  // 2. Если уже есть админ-сессия — пропускаем всех
   if (req.session?.isAdmin === true) {
-    console.log('✅ Админ авторизован через сессию');
-    // Если есть query — чистим
+    console.log('→ Админ через сессию → пропуск');
     if (Object.keys(req.query).length > 0) {
-      const cleanUrl = req.path;
-      console.log(`→ Редирект на чистый путь (админ-сессия): ${cleanUrl}`);
-      return res.redirect(302, cleanUrl);
+      console.log('→ Чистим query для админа');
+      return res.redirect(302, req.path);
     }
     return next();
   }
 
-  // 3. Проверяем, активен ли техперерыв
-  const isActive = maintenanceMode?.active === true;
+  // 3. Проверяем режим техперерыва
+  const isMaintenance = maintenanceMode?.active === true;
 
-  // Если техперерыв НЕ активен — всех пускаем
-  if (!isActive) {
-    // Но query всё равно чистим
+  if (!isMaintenance) {
+    console.log('→ Техперерыв выключен → пропуск');
     if (Object.keys(req.query).length > 0) {
-      const cleanUrl = req.path;
-      console.log(`→ Редирект на чистый путь (нет техперерыва): ${cleanUrl}`);
-      return res.redirect(302, cleanUrl);
+      return res.redirect(302, req.path);
     }
     return next();
   }
 
-  // 4. Техперерыв активен → строгая проверка доступа
-  console.log('🔧 Техперерыв активен, проверяем путь:', req.path);
+  // 4. Техперерыв активен → разрешаем только allowed пути
+  console.log('→ Техперерыв активен');
 
-  // Разрешённые пути — пропускаем всегда
-  if (allowedPaths.includes(req.path)) {
-    console.log('✅ Разрешенный путь:', req.path);
+  if (allowedPaths.includes(normalizedPath) || allowedPaths.includes(req.path)) {
+    console.log(`→ Разрешённый путь: ${req.path}`);
     return next();
   }
 
-  // API-запросы (кроме статуса)
-  if (req.path.startsWith('/api/')) {
-    if (req.path === '/api/maintenance-status') {
-      return next();
-    }
-    console.log('🚫 API заблокирован:', req.path);
+  // API-запросы (кроме статуса) → 503
+  if (req.path.startsWith('/api/') && req.path !== '/api/maintenance-status') {
+    console.log(`→ API заблокирован: ${req.path}`);
     return res.status(503).json({
       success: false,
       error: 'maintenance',
@@ -174,8 +160,8 @@ app.use((req, res, next) => {
     });
   }
 
-  // Всё остальное → редирект на страницу техперерыва
-  console.log('🚫 Редирект на working');
+  // Всё остальное → на страницу техперерыва
+  console.log(`→ Редирект на /working с пути: ${req.path}`);
   return res.redirect('/working');
 });
 app.use(passport.initialize());
