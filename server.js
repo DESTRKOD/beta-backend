@@ -43,56 +43,33 @@ app.use(session({
   }
 }));
 
-/// ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
+// ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
 app.use((req, res, next) => {
-  // Список путей, которые доступны во время техперерыва
-  const allowedPaths = [
-    '/working.html',
-    '/api/maintenance-status',
-    '/favicon.ico',
-    '/ping',
-    '/health',
-    '/status',
-    '/wakeup'
-  ];
-  
-  // Проверяем параметр admin_bypass в URL
+  // 1. Проверяем, есть ли в запросе секретный ключ
   const adminBypass = req.query.admin_bypass;
   const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
-  
-  // Если это админ с правильным ключом, сохраняем в сессию и пропускаем
+
+  // 2. Если ключ правильный - запоминаем админа в сессии и убираем ключ из URL
   if (isValidAdminBypass) {
-    // Сохраняем в сессию, чтобы не таскать параметр везде
-    req.session.isAdmin = true;
-    // Убираем параметр из URL (редирект на тот же путь без параметра)
-    if (Object.keys(req.query).length > 0) {
-      const url = req.path;
-      return res.redirect(url);
-    }
-    return next();
+    req.session.isAdmin = true; // <-- это критически важно!
+    // Убираем параметр из URL, чтобы он не светился
+    const urlWithoutParam = req.path;
+    return res.redirect(urlWithoutParam);
   }
-  
-  // Проверяем сессию админа
+
+  // 3. Проверяем сессию - может, админ уже авторизован
   if (req.session && req.session.isAdmin) {
-    return next();
+    return next(); // Пропускаем админа на сайт
   }
-  
-  // Если техперерыв активен и путь не в белом списке
-  if (isMaintenanceActive() && !allowedPaths.includes(req.path) && !req.path.startsWith('/api/')) {
-    return res.redirect('/working.html');
-  }
-  
-  // Для API запросов
-  if (req.path.startsWith('/api/') && req.path !== '/api/maintenance-status') {
-    if (isMaintenanceActive()) {
-      return res.status(503).json({ 
-        success: false, 
-        error: 'maintenance',
-        message: 'Технический перерыв'
-      });
+
+  // 4. Если техперерыв активен и это не админ - редирект на working
+  if (maintenanceMode.active) {
+    // Не перенаправляем, если мы уже на странице техперерыва
+    if (req.path !== '/working' && req.path !== '/working.html') {
+      return res.redirect('/working');
     }
   }
-  
+
   next();
 });
 app.use(passport.initialize());
