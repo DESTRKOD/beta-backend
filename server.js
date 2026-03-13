@@ -6903,23 +6903,33 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
+// ===== ПОЛУЧЕНИЕ ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ =====
 app.get('/api/auth/profile', async (req, res) => {
   try {
-    let userId = req.query.userId;
-    
-    if (!userId && req.session?.passport?.user) {
-      userId = req.session.passport.user;
+    // Приоритет 1: ID из сессии Passport (самый правильный способ)
+    let userId = req.session?.passport?.user;
+
+    // Приоритет 2: Если в сессии нет, берем из query-параметра (для отладки)
+    if (!userId) {
+      userId = req.query.userId;
     }
-    
+
+    // Если ID всё еще нет — это ошибка запроса
     if (!userId) {
       return res.status(400).json({ 
         success: false, 
         error: 'User ID is required. Provide ?userId= or login first.' 
       });
     }
-    
+
+    console.log(`[PROFILE] Запрос профиля для user ID: ${userId}`);
+
+    // Получаем данные пользователя
     const userResult = await pool.query(
-      'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url, created_at FROM users WHERE id = $1',
+      `SELECT 
+        id, tg_id, username, first_name, last_name, 
+        telegram_username, auth_provider, avatar_url, created_at 
+       FROM users WHERE id = $1`,
       [userId]
     );
     
@@ -6928,15 +6938,16 @@ app.get('/api/auth/profile', async (req, res) => {
     }
     
     const user = userResult.rows[0];
-    
+
+    // Получаем заказы пользователя
     const ordersResult = await pool.query(
-      `SELECT order_id as id, total, status, payment_status, code, 
-              code_requested, wrong_code_attempts, created_at as date, refund_amount
+      `SELECT 
+        order_id as id, total, status, payment_status, code, 
+        code_requested, wrong_code_attempts, created_at as date, refund_amount
        FROM orders 
-       WHERE user_id = $1 AND (
-         payment_status = 'confirmed' 
-         OR status IN ('waiting', 'waiting_code_request', 'waiting_execution', 'completed', 'manyback')
-       )
+       WHERE user_id = $1 
+         AND (payment_status = 'confirmed' 
+              OR status IN ('waiting', 'waiting_code_request', 'completed', 'manyback'))
        ORDER BY created_at DESC`,
       [userId]
     );
@@ -6951,9 +6962,10 @@ app.get('/api/auth/profile', async (req, res) => {
       codeRequested: order.code_requested,
       wrongAttempts: order.wrong_code_attempts,
       paymentStatus: order.payment_status,
-      isActive: order.status !== 'completed' && order.status !== 'canceled' && order.status !== 'manyback'
+      isActive: !['completed', 'canceled', 'manyback'].includes(order.status)
     }));
     
+    // Отправляем ответ
     res.json({
       success: true,
       user: {
@@ -6969,8 +6981,9 @@ app.get('/api/auth/profile', async (req, res) => {
       },
       orders: orders
     });
+
   } catch (error) {
-    console.error('Ошибка получения профиля:', error);
+    console.error('❌ Ошибка в /api/auth/profile:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
