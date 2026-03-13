@@ -6905,10 +6905,17 @@ app.get('/api/auth/check/:token', async (req, res) => {
 
 app.get('/api/auth/profile', async (req, res) => {
   try {
-    const userId = req.query.userId;
+    let userId = req.query.userId;
+    
+    if (!userId && req.session?.passport?.user) {
+      userId = req.session.passport.user;
+    }
     
     if (!userId) {
-      return res.status(400).json({ success: false, error: 'User ID is required' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'User ID is required. Provide ?userId= or login first.' 
+      });
     }
     
     const userResult = await pool.query(
