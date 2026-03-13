@@ -208,9 +208,11 @@ passport.use('yandex', new OAuth2Strategy({
       }
 
       // Получаем информацию о пользователе из Яндекс API
-      const userInfoResponse = await axios.get('https://login.yandex.ru/info', {
-        params: { format: 'json', oauth_token: accessToken }
-      });
+const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=json', {
+  headers: {
+    'Authorization': `OAuth ${accessToken}`
+  }
+});
       
       const yandexProfile = userInfoResponse.data;
       
