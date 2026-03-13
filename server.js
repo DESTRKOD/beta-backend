@@ -118,10 +118,11 @@ app.use((req, res, next) => {
       }
 
       // После bypass чистим query-параметры
-      if (Object.keys(req.query).length > 0) {
-        console.log("→ Редирект на чистый URL после bypass");
-        return res.redirect(302, req.path);
-      }
+      // НЕ редиректим API запросы
+  if (Object.keys(req.query).length > 0 && !req.path.startsWith('/api/')) {
+    console.log("→ Редирект на чистый URL (не API)");
+    return res.redirect(302, req.path);
+  }
 
       return next();
     });
