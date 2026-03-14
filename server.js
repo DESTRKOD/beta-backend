@@ -43,21 +43,18 @@ app.use(session({
   }
 }));
 
-
 // ===== ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
 let maintenanceMode = {
   active: false,
-  endTime: null, // timestamp окончания
-  duration: 0, // длительность в минутах
-  startedAt: null // timestamp начала
+  endTime: null,
+  duration: 0,
+  startedAt: null
 };
 
-// Проверка активен ли техперерыв (ТОЛЬКО по флагу, не по времени)
 function isMaintenanceActive() {
   return maintenanceMode.active;
 }
 
-// Функция для форматирования времени без смайликов
 function formatMaintenanceTime(minutes) {
   if (minutes < 60) {
     return `${minutes} мин`;
@@ -78,7 +75,6 @@ function getHoursWord(hours) {
 
 // ===== MIDDLEWARE ДЛЯ ПРОВЕРКИ ТЕХПЕРЕРЫВА =====
 app.use((req, res, next) => {
-  // ДЕБАГ-ЛОГИ — всегда первые
   console.log("═".repeat(70));
   console.log("[DEBUG MAINTENANCE] Запрос:", req.method, req.originalUrl);
   console.log("  → path:", req.path);
@@ -99,10 +95,8 @@ app.use((req, res, next) => {
     '/wakeup'
   ];
 
-  // Нормализуем путь (на случай /working/ или других вариаций)
   const normalizedPath = req.path.replace(/\/$/, '');
 
-  // 1. Самый высокий приоритет — admin bypass
   const adminBypass = req.query.admin_bypass;
   const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
@@ -117,18 +111,15 @@ app.use((req, res, next) => {
         console.log("→ Сессия успешно сохранена (bypass)");
       }
 
-      // После bypass чистим query-параметры
-      // НЕ редиректим API запросы
-  if (Object.keys(req.query).length > 0 && !req.path.startsWith('/api/')) {
-    console.log("→ Редирект на чистый URL (не API)");
-    return res.redirect(302, req.path);
-  }
+      if (Object.keys(req.query).length > 0 && !req.path.startsWith('/api/')) {
+        console.log("→ Редирект на чистый URL (не API)");
+        return res.redirect(302, req.path);
+      }
 
       return next();
     });
   }
 
-  // 2. Если уже есть админ-сессия
   if (req.session?.isAdmin === true) {
     console.log("→ Админ через сессию → полный доступ");
     if (Object.keys(req.query).length > 0) {
@@ -138,7 +129,6 @@ app.use((req, res, next) => {
     return next();
   }
 
-  // 3. Проверка техперерыва
   const isMaintenance = maintenanceMode?.active === true;
 
   if (!isMaintenance) {
@@ -149,7 +139,6 @@ app.use((req, res, next) => {
     return next();
   }
 
-  // 4. Техперерыв включён — строгие правила
   console.log("→ Техперерыв АКТИВЕН");
 
   if (allowedPaths.includes(normalizedPath) || allowedPaths.includes(req.path)) {
@@ -169,6 +158,7 @@ app.use((req, res, next) => {
   console.log(`→ Редирект на /working с пути: ${req.path}`);
   return res.redirect('/working');
 });
+
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -193,52 +183,66 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
-passport.use('yandex', new OAuth2Strategy({
-    authorizationURL: 'https://oauth.yandex.ru/authorize',
-    tokenURL: 'https://oauth.yandex.ru/token',
-    clientID: process.env.YANDEX_CLIENT_ID,
-    clientSecret: process.env.YANDEX_CLIENT_SECRET,
-    callbackURL: `${SERVER_URL}/api/auth/yandex/callback`
+// ===== VK ID STRATEGY =====
+passport.use('vkontakte', new OAuth2Strategy({
+    authorizationURL: 'https://id.vk.com/auth',
+    tokenURL: 'https://api.vk.com/oauth/token',
+    clientID: process.env.VK_CLIENT_ID,
+    clientSecret: process.env.VK_CLIENT_SECRET,
+    callbackURL: `${SERVER_URL}/api/auth/vk/callback`,
+    scope: ['email', 'photos']
   },
-  async (accessToken, refreshToken, profile, done) => {
+  async (accessToken, refreshToken, params, done) => {
     try {
-      // Проверяем, что pool инициализирован
       if (!pool) {
         console.error('❌ Database pool is not initialized');
         return done(new Error('Database connection error'), null);
       }
 
-      // Получаем информацию о пользователе из Яндекс API
-const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=json', {
-  headers: {
-    'Authorization': `OAuth ${accessToken}`
-  }
-});
+      // Получаем email из параметров (VK возвращает email отдельно)
+      const email = params.email || null;
+
+      // Получаем данные пользователя из VK API
+      const userInfoResponse = await axios.get('https://api.vk.com/method/users.get', {
+        params: {
+          access_token: accessToken,
+          v: '5.131',
+          fields: 'photo_200,first_name,last_name'
+        }
+      });
+
+      const vkProfile = userInfoResponse.data.response?.[0];
       
-      const yandexProfile = userInfoResponse.data;
+      if (!vkProfile) {
+        return done(new Error('Failed to get VK profile'), null);
+      }
+
+      const vkId = vkProfile.id.toString();
+      const firstName = vkProfile.first_name || '';
+      const lastName = vkProfile.last_name || '';
+      const photoUrl = vkProfile.photo_200 || null;
       
-      // Ищем пользователя по yandex_id (основной идентификатор)
+      // Формируем имя пользователя
+      let displayName = firstName;
+      if (lastName) {
+        displayName = `${firstName} ${lastName}`;
+      }
+      if (!displayName.trim()) {
+        displayName = `VK User ${vkId}`;
+      }
+
+      // Ищем пользователя по vk_id
       let user = await pool.query(
-        'SELECT * FROM users WHERE yandex_id = $1',
-        [yandexProfile.id]
+        'SELECT * FROM users WHERE vk_id = $1',
+        [vkId]
       );
-      
-      // Формируем URL аватарки если есть
-      const avatarUrl = yandexProfile.default_avatar_id 
-        ? `https://avatars.yandex.net/get-yapic/${yandexProfile.default_avatar_id}/islands-200` 
-        : null;
-      
+
       if (user.rows.length === 0) {
         // ===== НОВЫЙ ПОЛЬЗОВАТЕЛЬ =====
-        console.log('📝 Регистрация нового пользователя через Яндекс');
+        console.log('📝 Регистрация нового пользователя через VK ID');
         
-        // Генерируем базовое имя пользователя
-        let baseUsername = yandexProfile.display_name || 
-                          yandexProfile.first_name || 
-                          yandexProfile.last_name || 
-                          `Yandex_User`;
-        
-        // Проверяем уникальность имени и добавляем суффикс если нужно
+        // Проверяем уникальность имени
+        let baseUsername = displayName;
         let username = baseUsername;
         let counter = 1;
         
@@ -258,25 +262,27 @@ const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=js
         const newUser = await pool.query(
           `INSERT INTO users (
             username,
+            email,
             email_verified,
             auth_provider,
-            yandex_id,
-            yandex_first_name,
-            yandex_last_name,
-            yandex_display_name,
-            yandex_avatar_url,
+            vk_id,
+            vk_first_name,
+            vk_last_name,
+            vk_email,
+            vk_avatar_url,
             avatar_url
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
           [
             username,
-            true,
-            'yandex',  // Новый пользователь - чистый Яндекс
-            yandexProfile.id,
-            yandexProfile.first_name || null,
-            yandexProfile.last_name || null,
-            yandexProfile.display_name || null,
-            avatarUrl,
-            avatarUrl
+            email,
+            !!email,
+            'vk',
+            vkId,
+            firstName,
+            lastName,
+            email,
+            photoUrl,
+            photoUrl
           ]
         );
         
@@ -287,13 +293,11 @@ const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=js
         // ===== СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ =====
         console.log(`🔄 Обновление данных пользователя ID: ${user.rows[0].id}`);
         
-        // Определяем текущий провайдер
         const currentProvider = user.rows[0].auth_provider;
         
-        // Если у пользователя был Telegram, сохраняем комбинированный провайдер
-        let newProvider = 'yandex';
-        if (currentProvider === 'yandex+telegram' || currentProvider === 'telegram') {
-          newProvider = 'yandex+telegram';
+        let newProvider = 'vk';
+        if (currentProvider === 'vk+telegram' || currentProvider === 'telegram') {
+          newProvider = 'vk+telegram';
           console.log('📌 Сохраняем привязку Telegram');
         }
         
@@ -302,18 +306,20 @@ const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=js
           `UPDATE users SET 
             last_login = CURRENT_TIMESTAMP,
             auth_provider = $1,
-            yandex_first_name = COALESCE($2, yandex_first_name),
-            yandex_last_name = COALESCE($3, yandex_last_name),
-            yandex_display_name = COALESCE($4, yandex_display_name),
-            yandex_avatar_url = COALESCE($5, yandex_avatar_url),
+            email = COALESCE($2, email),
+            email_verified = COALESCE($2 IS NOT NULL, email_verified),
+            vk_first_name = COALESCE($3, vk_first_name),
+            vk_last_name = COALESCE($4, vk_last_name),
+            vk_email = COALESCE($2, vk_email),
+            vk_avatar_url = COALESCE($5, vk_avatar_url),
             avatar_url = COALESCE($5, avatar_url)
            WHERE id = $6 RETURNING *`,
           [
             newProvider,
-            yandexProfile.first_name || null,
-            yandexProfile.last_name || null,
-            yandexProfile.display_name || null,
-            avatarUrl,
+            email,
+            firstName,
+            lastName,
+            photoUrl,
             user.rows[0].id
           ]
         );
@@ -321,49 +327,193 @@ const userInfoResponse = await axios.get('https://login.yandex.ru/info?format=js
         console.log(`✅ Данные пользователя обновлены. Провайдер: ${newProvider}`);
       }
       
-      // Возвращаем пользователя
       return done(null, user.rows[0]);
       
     } catch (error) {
-      console.error('❌ Ошибка Яндекс авторизации:', error);
+      console.error('❌ Ошибка VK авторизации:', error);
       return done(error, null);
     }
   }
 ));
 
-app.get('/api/auth/yandex', passport.authenticate('yandex'));
+// ===== VK AUTH ROUTES =====
+app.get('/api/auth/vk', (req, res, next) => {
+  // Перенаправляем на VK ID
+  const vkAuthUrl = 'https://id.vk.com/auth?' + new URLSearchParams({
+    app_id: process.env.VK_CLIENT_ID,
+    redirect_uri: `${SERVER_URL}/api/auth/vk/callback`,
+    state: crypto.randomBytes(16).toString('hex'),
+    scope: 'email photos',
+    response_type: 'code',
+    v: '5.131'
+  });
+  
+  res.redirect(vkAuthUrl);
+});
 
-app.get('/api/auth/yandex/callback',
-  (req, res, next) => {
-    passport.authenticate('yandex', (err, user, info) => {
-      if (err) {
-        console.error('❌ Ошибка аутентификации Яндекс:', err);
-        return res.redirect(`${SITE_URL}/reg_log.html?error=yandex_failed&details=${encodeURIComponent(err.message)}`);
-      }
-      if (!user) {
-        return res.redirect(`${SITE_URL}/reg_log.html?error=yandex_failed`);
-      }
-      req.logIn(user, (loginErr) => {
-        if (loginErr) {
-          console.error('❌ Ошибка входа:', loginErr);
-          return res.redirect(`${SITE_URL}/reg_log.html?error=login_failed`);
-        }
-        
-        const token = crypto.randomBytes(16).toString('hex');
-        
-        authSessions.set(`auth_${token}`, {
-          userId: req.user.id,
-          username: req.user.username,
-          type: 'auth_success'
-        });
-        
-        return res.redirect(`${SITE_URL}/index.html?auth=${token}`);
-      });
-    })(req, res, next);
+app.get('/api/auth/vk/callback', async (req, res, next) => {
+  const { code, state } = req.query;
+  
+  if (!code) {
+    console.error('❌ VK callback: no code provided');
+    return res.redirect(`${SITE_URL}/reg_log.html?error=vk_failed`);
   }
-);
+  
+  try {
+    // Обмениваем код на токен
+    const tokenResponse = await axios.get('https://oauth.vk.com/access_token', {
+      params: {
+        client_id: process.env.VK_CLIENT_ID,
+        client_secret: process.env.VK_CLIENT_SECRET,
+        redirect_uri: `${SERVER_URL}/api/auth/vk/callback`,
+        code: code,
+        v: '5.131'
+      }
+    });
 
+    const tokenData = tokenResponse.data;
+    const accessToken = tokenData.access_token;
+    const email = tokenData.email || null;
 
+    // Получаем данные пользователя
+    const userInfoResponse = await axios.get('https://api.vk.com/method/users.get', {
+      params: {
+        access_token: accessToken,
+        v: '5.131',
+        fields: 'photo_200,first_name,last_name'
+      }
+    });
+
+    const vkProfile = userInfoResponse.data.response?.[0];
+    
+    if (!vkProfile) {
+      throw new Error('Failed to get VK profile');
+    }
+
+    const vkId = vkProfile.id.toString();
+    const firstName = vkProfile.first_name || '';
+    const lastName = vkProfile.last_name || '';
+    const photoUrl = vkProfile.photo_200 || null;
+    
+    let displayName = firstName;
+    if (lastName) {
+      displayName = `${firstName} ${lastName}`;
+    }
+    if (!displayName.trim()) {
+      displayName = `VK User ${vkId}`;
+    }
+
+    // Ищем или создаем пользователя
+    let user = await pool.query(
+      'SELECT * FROM users WHERE vk_id = $1',
+      [vkId]
+    );
+
+    if (user.rows.length === 0) {
+      console.log('📝 Регистрация нового пользователя через VK ID');
+      
+      let baseUsername = displayName;
+      let username = baseUsername;
+      let counter = 1;
+      
+      while (true) {
+        const existingUser = await pool.query(
+          'SELECT id FROM users WHERE username = $1',
+          [username]
+        );
+        
+        if (existingUser.rows.length === 0) break;
+        
+        username = `${baseUsername}_${counter}`;
+        counter++;
+      }
+      
+      const newUser = await pool.query(
+        `INSERT INTO users (
+          username,
+          email,
+          email_verified,
+          auth_provider,
+          vk_id,
+          vk_first_name,
+          vk_last_name,
+          vk_email,
+          vk_avatar_url,
+          avatar_url
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [
+          username,
+          email,
+          !!email,
+          'vk',
+          vkId,
+          firstName,
+          lastName,
+          email,
+          photoUrl,
+          photoUrl
+        ]
+      );
+      
+      user = newUser;
+      
+    } else {
+      console.log(`🔄 Обновление данных пользователя ID: ${user.rows[0].id}`);
+      
+      const currentProvider = user.rows[0].auth_provider;
+      
+      let newProvider = 'vk';
+      if (currentProvider === 'vk+telegram' || currentProvider === 'telegram') {
+        newProvider = 'vk+telegram';
+      }
+      
+      user = await pool.query(
+        `UPDATE users SET 
+          last_login = CURRENT_TIMESTAMP,
+          auth_provider = $1,
+          email = COALESCE($2, email),
+          email_verified = COALESCE($2 IS NOT NULL, email_verified),
+          vk_first_name = COALESCE($3, vk_first_name),
+          vk_last_name = COALESCE($4, vk_last_name),
+          vk_email = COALESCE($2, vk_email),
+          vk_avatar_url = COALESCE($5, vk_avatar_url),
+          avatar_url = COALESCE($5, avatar_url)
+         WHERE id = $6 RETURNING *`,
+        [
+          newProvider,
+          email,
+          firstName,
+          lastName,
+          photoUrl,
+          user.rows[0].id
+        ]
+      );
+    }
+
+    const loggedInUser = user.rows[0];
+    
+    req.logIn(loggedInUser, (loginErr) => {
+      if (loginErr) {
+        console.error('❌ Ошибка входа:', loginErr);
+        return res.redirect(`${SITE_URL}/reg_log.html?error=login_failed`);
+      }
+      
+      const token = crypto.randomBytes(16).toString('hex');
+      
+      authSessions.set(`auth_${token}`, {
+        userId: loggedInUser.id,
+        username: loggedInUser.username,
+        type: 'auth_success'
+      });
+      
+      return res.redirect(`${SITE_URL}/index.html?auth=${token}`);
+    });
+
+  } catch (error) {
+    console.error('❌ Ошибка VK авторизации:', error);
+    return res.redirect(`${SITE_URL}/reg_log.html?error=vk_failed&details=${encodeURIComponent(error.message)}`);
+  }
+});
 
 let adminBot;
 let userBot;
@@ -437,11 +587,27 @@ async function initDB() {
     `);
     console.log('✅ Базовая таблица users создана');
 
-    const allColumnsToAdd = [
+    // Сначала удаляем старые Яндекс колонки (если они были)
+    const yandexColumns = [
+      'yandex_id', 'yandex_email', 'yandex_first_name', 'yandex_last_name',
+      'yandex_display_name', 'yandex_avatar_url'
+    ];
+    
+    for (const column of yandexColumns) {
+      try {
+        await pool.query(`ALTER TABLE users DROP COLUMN IF EXISTS ${column}`);
+        console.log(`✅ Колонка ${column} удалена`);
+      } catch (e) {
+        console.log(`⚠️ Ошибка при удалении ${column}:`, e.message);
+      }
+    }
+
+    // Добавляем новые колонки для VK
+    const vkColumnsToAdd = [
       { name: 'username', type: 'VARCHAR(100)' },
       { name: 'email', type: 'VARCHAR(255)' },
       { name: 'email_verified', type: 'BOOLEAN DEFAULT FALSE' },
-      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'email\'' },
+      { name: 'auth_provider', type: 'VARCHAR(20) DEFAULT \'vk\'' },
       { name: 'avatar_url', type: 'TEXT' },
       { name: 'tg_id', type: 'BIGINT UNIQUE' },
       { name: 'telegram_username', type: 'VARCHAR(100)' },
@@ -450,15 +616,14 @@ async function initDB() {
       { name: 'telegram_avatar_url', type: 'TEXT' },
       { name: 'first_name', type: 'VARCHAR(100)' },
       { name: 'last_name', type: 'VARCHAR(100)' },
-      { name: 'yandex_id', type: 'VARCHAR(100) UNIQUE' },
-      { name: 'yandex_email', type: 'VARCHAR(255)' },
-      { name: 'yandex_first_name', type: 'VARCHAR(100)' },
-      { name: 'yandex_last_name', type: 'VARCHAR(100)' },
-      { name: 'yandex_display_name', type: 'VARCHAR(100)' },
-      { name: 'yandex_avatar_url', type: 'TEXT' }
+      { name: 'vk_id', type: 'VARCHAR(100) UNIQUE' },
+      { name: 'vk_email', type: 'VARCHAR(255)' },
+      { name: 'vk_first_name', type: 'VARCHAR(100)' },
+      { name: 'vk_last_name', type: 'VARCHAR(100)' },
+      { name: 'vk_avatar_url', type: 'TEXT' }
     ];
 
-    for (const column of allColumnsToAdd) {
+    for (const column of vkColumnsToAdd) {
       try {
         await pool.query(`
           ALTER TABLE users 
@@ -668,6 +833,7 @@ function startKeepAlive() {
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
 }
 
+// ===== TELEGRAM BOT HANDLERS =====
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -688,7 +854,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'telegram_link') {
           console.log(`🔗 Привязка Telegram к пользователю ${session.userId}`);
           
-          // Проверяем, не привязан ли уже этот Telegram к другому аккаунту
           const existingUser = await pool.query(
             'SELECT id FROM users WHERE tg_id = $1 AND id != $2',
             [userId, session.userId]
@@ -714,6 +879,20 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             }
           } catch (photoError) {}
           
+          // Определяем новый провайдер
+          const userResult = await pool.query(
+            'SELECT auth_provider FROM users WHERE id = $1',
+            [session.userId]
+          );
+          
+          let newProvider = 'telegram';
+          if (userResult.rows.length > 0) {
+            const currentProvider = userResult.rows[0].auth_provider;
+            if (currentProvider === 'vk') {
+              newProvider = 'vk+telegram';
+            }
+          }
+          
           await pool.query(
             `UPDATE users SET 
               tg_id = $1,
@@ -722,12 +901,9 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
               last_name = $4,
               telegram_avatar_url = $5,
               avatar_url = COALESCE($5, avatar_url),
-              auth_provider = CASE 
-                WHEN auth_provider = 'yandex' THEN 'yandex+telegram'
-                ELSE 'telegram'
-              END
-             WHERE id = $6`,
-            [userId, userUsername, userFirstName, userLastName, photoUrl, session.userId]
+              auth_provider = $6
+             WHERE id = $7`,
+            [userId, userUsername, userFirstName, userLastName, photoUrl, newProvider, session.userId]
           );
           
           authSessions.delete(`link_${token}`);
@@ -757,7 +933,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         if (session.type === 'register') {
           console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
           
-          // Проверяем, не зарегистрирован ли уже этот Telegram
           const existingUser = await pool.query(
             'SELECT id FROM users WHERE tg_id = $1',
             [userId]
@@ -975,7 +1150,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-
 // ===== КОМАНДА /working - ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
 adminBot.onText(/\/working/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -983,7 +1157,6 @@ adminBot.onText(/\/working/, async (msg) => {
   const chatId = msg.chat.id;
   
   if (maintenanceMode.active) {
-    // Если перерыв уже активен, показываем кнопку завершения
     const keyboard = {
       inline_keyboard: [
         [{ text: 'Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
@@ -1006,14 +1179,12 @@ adminBot.onText(/\/working/, async (msg) => {
     return;
   }
   
-  // Запрашиваем время
   userStates[chatId] = { action: 'maintenance_duration' };
   await adminBot.sendMessage(
     chatId,
     '🔧 Настройка технического перерыва\n\nВведите длительность в минутах:'
   );
 });
-
 
 userBot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
@@ -1162,9 +1333,6 @@ userBot.onText(/\/orders/, async (msg) => {
   }
 });
 
-
-
-
 async function getBotUsername() {
   try {
     if (USER_BOT_USERNAME) {
@@ -1210,7 +1378,6 @@ function getStatusText(status) {
   };
   return statusMap[status] || status;
 }
-
 
 // ===== КОМАНДА /status - СТАТУС МАГАЗИНА =====
 adminBot.onText(/\/status/, async (msg) => {
@@ -1424,8 +1591,6 @@ adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
       }
       
       await client.query('COMMIT');
-
-      
       
       let successText = `✅ Баланс пользователя пополнен!\n\n` +
         `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
@@ -1937,12 +2102,10 @@ adminBot.on('message', async (msg) => {
     return;
   }
 
-
-  
-   else if (userState.action === 'maintenance_duration') {
+  else if (userState.action === 'maintenance_duration') {
     const minutes = parseInt(text);
     
-    if (isNaN(minutes) || minutes < 1 || minutes > 1440) { // максимум 24 часа
+    if (isNaN(minutes) || minutes < 1 || minutes > 1440) {
       adminBot.sendMessage(chatId, '❌ Введите корректное число минут (от 1 до 1440)');
       return;
     }
@@ -1977,7 +2140,6 @@ adminBot.on('message', async (msg) => {
       }
     );
     
-    // Уведомление админу
     await adminBot.sendMessage(
       ADMIN_ID,
       `🔧 Технический перерыв активирован\n\nАдминистратор запустил техперерыв на ${formattedDuration}.`
@@ -2009,7 +2171,7 @@ adminBot.on('message', async (msg) => {
     return;
   }
 
-    else if (userState.action === 'addbalance') {
+  else if (userState.action === 'addbalance') {
     const amount = parseInt(text);
     const userId = userState.userId;
     
@@ -2018,7 +2180,6 @@ adminBot.on('message', async (msg) => {
       return;
     }
     
-    // Получаем информацию о пользователе
     const userResult = await pool.query(
       'SELECT id, tg_id, username FROM users WHERE id = $1',
       [userId]
@@ -2182,7 +2343,7 @@ adminBot.on('message', async (msg) => {
     return;
   }
 
-    else if (userState.action === 'addbalance') {
+  else if (userState.action === 'addbalance') {
     const amount = parseInt(text);
     const userId = userState.userId;
     
@@ -2190,10 +2351,7 @@ adminBot.on('message', async (msg) => {
       adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
       return;
     }
-
     
-    
-    // Эмулируем команду /addbalance
     const fakeMsg = { 
       ...msg, 
       text: `/addbalance ${userId} ${amount}`,
@@ -2223,7 +2381,6 @@ adminBot.on('callback_query', async (cb) => {
 
   console.log('Callback получен:', data);
 
-  // ===== ДИАЛОГИ ПОДДЕРЖКИ =====
   if (data.startsWith('dialogs_filter:')) {
     const filter = data.split(':')[1];
     await adminBot.deleteMessage(chatId, messageId);
@@ -2232,70 +2389,83 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data.startsWith('support_view:')) {
-  const dialogId = parseInt(data.split(':')[1]);
+    const dialogId = parseInt(data.split(':')[1]);
 
-  try {
-    const dialogRes = await pool.query(`
-      SELECT d.*, u.username, u.tg_id, u.first_name, u.last_name
-      FROM support_dialogs d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.id = $1
-    `, [dialogId]);
+    try {
+      const dialogRes = await pool.query(`
+        SELECT d.*, u.username, u.tg_id, u.first_name, u.last_name, u.email, u.vk_email, u.vk_first_name, u.vk_last_name
+        FROM support_dialogs d
+        JOIN users u ON d.user_id = u.id
+        WHERE d.id = $1
+      `, [dialogId]);
 
-    if (dialogRes.rows.length === 0) {
-      return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
-    }
-
-    const dialog = dialogRes.rows[0];
-
-    const msgs = await pool.query(`
-      SELECT sender, message, metadata, created_at
-      FROM support_messages
-      WHERE dialog_id = $1
-      ORDER BY created_at ASC
-    `, [dialogId]);
-
-    let text = `💬 Диалог #${dialogId}\n\n`;
-    text += `👤 Пользователь ID: \`${dialog.user_id}\`\n`;
-    if (dialog.username) {
-      text += `   Имя: ${dialog.username}\n`;
-    }
-    if (dialog.tg_id) {
-      text += `   TG: \`${dialog.tg_id}\`\n`;
-    }
-    text += `Статус: ${dialog.status === 'active' ? '🟢 Активен' : '🔴 Закрыт'}\n`;
-    text += `Сообщений: ${msgs.rows.length}\n\n────────────────────\n`;
-
-    msgs.rows.forEach(m => {
-      const sender = m.sender === 'user' ? '👤' : '🛠️';
-      text += `${sender} ${new Date(m.created_at).toLocaleString('ru-RU')}\n`;
-      if (m.metadata?.file) {
-        text += m.metadata.file.isImage ? `[Фото: ${m.metadata.file.name}]\n` : `[Файл: ${m.metadata.file.name}]\n`;
-      } else {
-        text += `${m.message || '[без текста]'}\n`;
+      if (dialogRes.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { text: 'Диалог не найден', show_alert: true });
       }
-      text += '────────────────────\n';
-    });
 
-    const kb = {
-      inline_keyboard: [
-        [
-          { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
-          { text: dialog.status === 'active' ? '🔒 Закрыть' : '🔓 Открыть', callback_data: `support_toggle:${dialogId}` }
-        ],
-        [{ text: '← Назад к списку', callback_data: 'dialogs_all' }]
-      ]
-    };
+      const dialog = dialogRes.rows[0];
 
-    await adminBot.sendMessage(chatId, text, { reply_markup: kb });
-    await adminBot.deleteMessage(chatId, messageId);
-    await adminBot.answerCallbackQuery(cb.id);
-  } catch (err) {
-    console.error('Ошибка при открытии диалога:', err);
-    await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка загрузки диалога', show_alert: true });
+      const msgs = await pool.query(`
+        SELECT sender, message, metadata, created_at
+        FROM support_messages
+        WHERE dialog_id = $1
+        ORDER BY created_at ASC
+      `, [dialogId]);
+
+      let text = `💬 Диалог #${dialogId}\n\n`;
+      text += `👤 Пользователь ID: \`${dialog.user_id}\`\n`;
+      
+      // Определяем отображаемое имя (приоритет: VK > обычное имя)
+      let displayName = dialog.username || '';
+      if (dialog.vk_first_name || dialog.vk_last_name) {
+        displayName = `${dialog.vk_first_name || ''} ${dialog.vk_last_name || ''}`.trim();
+      }
+      if (displayName) {
+        text += `   Имя: ${displayName}\n`;
+      }
+      
+      // Показываем email (приоритет: VK email > обычный email)
+      const displayEmail = dialog.vk_email || dialog.email;
+      if (displayEmail) {
+        text += `   Email: ${displayEmail}\n`;
+      }
+      
+      if (dialog.tg_id) {
+        text += `   TG: \`${dialog.tg_id}\`\n`;
+      }
+      text += `Статус: ${dialog.status === 'active' ? '🟢 Активен' : '🔴 Закрыт'}\n`;
+      text += `Сообщений: ${msgs.rows.length}\n\n────────────────────\n`;
+
+      msgs.rows.forEach(m => {
+        const sender = m.sender === 'user' ? '👤' : '🛠️';
+        text += `${sender} ${new Date(m.created_at).toLocaleString('ru-RU')}\n`;
+        if (m.metadata?.file) {
+          text += m.metadata.file.isImage ? `[Фото: ${m.metadata.file.name}]\n` : `[Файл: ${m.metadata.file.name}]\n`;
+        } else {
+          text += `${m.message || '[без текста]'}\n`;
+        }
+        text += '────────────────────\n';
+      });
+
+      const kb = {
+        inline_keyboard: [
+          [
+            { text: '✉️ Ответить', callback_data: `support_reply:${dialogId}` },
+            { text: dialog.status === 'active' ? '🔒 Закрыть' : '🔓 Открыть', callback_data: `support_toggle:${dialogId}` }
+          ],
+          [{ text: '← Назад к списку', callback_data: 'dialogs_all' }]
+        ]
+      };
+
+      await adminBot.sendMessage(chatId, text, { reply_markup: kb });
+      await adminBot.deleteMessage(chatId, messageId);
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (err) {
+      console.error('Ошибка при открытии диалога:', err);
+      await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка загрузки диалога', show_alert: true });
+    }
+    return;
   }
-  return;
-}
 
   if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -2448,146 +2618,29 @@ adminBot.on('callback_query', async (cb) => {
       
       let infoText = `👤 **Информация о пользователе**\n\n`;
       infoText += `**ID в магазине:** ${user.id}\n`;
-      infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
-      infoText += `**TG ID:** ${user.tg_id || 'Не привязан'}\n`;
-      infoText += `**Telegram Username:** @${user.telegram_username || 'отсутствует'}\n`;
-      infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
-      infoText += `\n\n**Статистика:**\n`;
-      infoText += `• Заказов: ${user.orders_count || 0}\n`;
-      infoText += `• Потрачено: ${formatRub(user.total_spent || 0)}\n`;
-      infoText += `• Обращений в поддержку: ${user.dialogs_count || 0}\n`;
-      infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
-      infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
       
-      await adminBot.sendMessage(chatId, infoText, { parse_mode: 'Markdown' });
-      await adminBot.answerCallbackQuery(cb.id);
-      
-    } catch (error) {
-      console.error('❌ Ошибка получения инфо о пользователе:', error);
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '❌ Ошибка',
-        show_alert: true 
-      });
-    }
-    return;
-  }
-
-
-
-    // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (ПОДТВЕРЖДЕНИЕ) =====
-  if (data === 'maintenance_end_confirm') {
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '✅ Да, завершить', callback_data: 'maintenance_end_yes' },
-          { text: '❌ Нет, оставить', callback_data: 'maintenance_end_no' }
-        ]
-      ]
-    };
-    
-    await adminBot.editMessageText(
-      '⚠️ *Вы уверены, что хотите завершить технический перерыв?*',
-      {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
+      // Определяем отображаемое имя
+      let displayName = user.username || 'Не указано';
+      if (user.vk_first_name || user.vk_last_name) {
+        displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
       }
-    );
-    
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-  // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (ДА) =====
-  if (data === 'maintenance_end_yes') {
-    maintenanceMode = {
-      active: false,
-      endTime: null,
-      duration: 0,
-      startedAt: null
-    };
-    
-    await adminBot.editMessageText(
-      '✅ *Технический перерыв завершен*\n\nМагазин снова работает в обычном режиме.',
-      {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown'
-      }
-    );
-    
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-  // ===== ЗАВЕРШЕНИЕ ТЕХПЕРЕРЫВА (НЕТ) =====
-  if (data === 'maintenance_end_no') {
-    await adminBot.deleteMessage(chatId, messageId);
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-    // ===== ПАГИНАЦИЯ ДЛЯ /users =====
-  if (data.startsWith('users_page:')) {
-    const page = data.split(':')[1];
-    
-    // Эмулируем команду /users с номером страницы
-    const fakeMsg = { 
-      ...cb.message, 
-      text: `/users ${page}`, 
-      chat: { id: chatId },
-      from: { id: ADMIN_ID }
-    };
-    
-    await adminBot.emit('text', fakeMsg);
-    await adminBot.deleteMessage(chatId, messageId);
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-  if (data === 'dialogs_all') {
-    const fakeMsg = { ...cb.message, text: '/dialogs', chat: { id: chatId } };
-    await adminBot.emit('text', fakeMsg);
-    await adminBot.deleteMessage(chatId, messageId);
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-    // ===== ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ =====
-  if (data.startsWith('support_userinfo:')) {
-    const userId = parseInt(data.split(':')[1]);
-    
-    try {
-      const userResult = await pool.query(`
-        SELECT u.*, 
-               (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as orders_count,
-               (SELECT SUM(total) FROM orders WHERE user_id = u.id AND payment_status = 'confirmed') as total_spent,
-               (SELECT COUNT(*) FROM support_dialogs WHERE user_id = u.id) as dialogs_count
-        FROM users u
-        WHERE u.id = $1
-      `, [userId]);
+      infoText += `**Имя:** ${displayName}\n`;
       
-      if (userResult.rows.length === 0) {
-        return adminBot.answerCallbackQuery(cb.id, { 
-          text: '❌ Пользователь не найден',
-          show_alert: true 
-        });
+      // Показываем email (приоритет VK)
+      if (user.vk_email) {
+        infoText += `**VK Email:** ${user.vk_email}\n`;
+      } else if (user.email) {
+        infoText += `**Email:** ${user.email}\n`;
       }
       
-      const user = userResult.rows[0];
-      
-      let infoText = `👤 **Информация о пользователе**\n\n`;
-      infoText += `**ID в магазине:** \`${user.id}\`\n`;
-      infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
       infoText += `**TG ID:** ${user.tg_id ? '`' + user.tg_id + '`' : 'Не привязан'}\n`;
       infoText += `**Telegram Username:** ${user.telegram_username ? '@' + user.telegram_username : '—'}\n`;
       infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
       infoText += `\n\n**Провайдер:** `;
       
       if (user.auth_provider === 'telegram') infoText += '📱 Telegram';
-      else if (user.auth_provider === 'yandex') infoText += 'Я Яндекс';
-      else if (user.auth_provider === 'yandex+telegram') infoText += '🔗 Яндекс+Telegram';
+      else if (user.auth_provider === 'vk') infoText += '📱 VK ID';
+      else if (user.auth_provider === 'vk+telegram') infoText += '🔗 VK+Telegram';
       else infoText += '📧 Email';
       
       infoText += `\n\n**Статистика:**\n`;
@@ -2597,7 +2650,6 @@ adminBot.on('callback_query', async (cb) => {
       infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
       infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
       
-      // Кнопки действий
       const actionKeyboard = {
         inline_keyboard: [
           [
@@ -2630,7 +2682,170 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
-      // ===== ЗАКАЗЫ ПОЛЬЗОВАТЕЛЯ =====
+
+  if (data === 'maintenance_end_confirm') {
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Да, завершить', callback_data: 'maintenance_end_yes' },
+          { text: '❌ Нет, оставить', callback_data: 'maintenance_end_no' }
+        ]
+      ]
+    };
+    
+    await adminBot.editMessageText(
+      '⚠️ *Вы уверены, что хотите завершить технический перерыв?*',
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data === 'maintenance_end_yes') {
+    maintenanceMode = {
+      active: false,
+      endTime: null,
+      duration: 0,
+      startedAt: null
+    };
+    
+    await adminBot.editMessageText(
+      '✅ *Технический перерыв завершен*\n\nМагазин снова работает в обычном режиме.',
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data === 'maintenance_end_no') {
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data.startsWith('users_page:')) {
+    const page = data.split(':')[1];
+    
+    const fakeMsg = { 
+      ...cb.message, 
+      text: `/users ${page}`, 
+      chat: { id: chatId },
+      from: { id: ADMIN_ID }
+    };
+    
+    await adminBot.emit('text', fakeMsg);
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data === 'dialogs_all') {
+    const fakeMsg = { ...cb.message, text: '/dialogs', chat: { id: chatId } };
+    await adminBot.emit('text', fakeMsg);
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data.startsWith('support_userinfo:')) {
+    const userId = parseInt(data.split(':')[1]);
+    
+    try {
+      const userResult = await pool.query(`
+        SELECT u.*, 
+               (SELECT COUNT(*) FROM orders WHERE user_id = u.id) as orders_count,
+               (SELECT SUM(total) FROM orders WHERE user_id = u.id AND payment_status = 'confirmed') as total_spent,
+               (SELECT COUNT(*) FROM support_dialogs WHERE user_id = u.id) as dialogs_count
+        FROM users u
+        WHERE u.id = $1
+      `, [userId]);
+      
+      if (userResult.rows.length === 0) {
+        return adminBot.answerCallbackQuery(cb.id, { 
+          text: '❌ Пользователь не найден',
+          show_alert: true 
+        });
+      }
+      
+      const user = userResult.rows[0];
+      
+      let infoText = `👤 **Информация о пользователе**\n\n`;
+      infoText += `**ID в магазине:** \`${user.id}\`\n`;
+      
+      // Определяем отображаемое имя (приоритет VK)
+      let displayName = user.username || 'Не указано';
+      if (user.vk_first_name || user.vk_last_name) {
+        displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
+      }
+      infoText += `**Имя:** ${displayName}\n`;
+      
+      // Показываем email (приоритет VK)
+      const displayEmail = user.vk_email || user.email;
+      if (displayEmail) {
+        infoText += `**Email:** ${displayEmail}\n`;
+      }
+      
+      infoText += `**TG ID:** ${user.tg_id ? '`' + user.tg_id + '`' : 'Не привязан'}\n`;
+      infoText += `**Telegram Username:** ${user.telegram_username ? '@' + user.telegram_username : '—'}\n`;
+      infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
+      infoText += `\n\n**Провайдер:** `;
+      
+      if (user.auth_provider === 'telegram') infoText += '📱 Telegram';
+      else if (user.auth_provider === 'vk') infoText += '📱 VK ID';
+      else if (user.auth_provider === 'vk+telegram') infoText += '🔗 VK+Telegram';
+      else infoText += '📧 Email';
+      
+      infoText += `\n\n**Статистика:**\n`;
+      infoText += `• Заказов: ${user.orders_count || 0}\n`;
+      infoText += `• Потрачено: ${formatRub(user.total_spent || 0)}\n`;
+      infoText += `• Обращений в поддержку: ${user.dialogs_count || 0}\n`;
+      infoText += `\n**Дата регистрации:** ${new Date(user.created_at).toLocaleDateString('ru-RU')}\n`;
+      infoText += `**Последний вход:** ${new Date(user.last_login).toLocaleDateString('ru-RU')}`;
+      
+      const actionKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '📦 Заказы', callback_data: `user_orders:${user.id}` },
+            { text: '💬 Диалоги', callback_data: `user_dialogs:${user.id}` }
+          ],
+          [
+            { text: '💰 Пополнить', callback_data: `addbalance_prompt:${user.id}` },
+            { text: '📊 Статистика', callback_data: `user_stats:${user.id}` }
+          ],
+          [
+            { text: '⬅️ Назад к списку', callback_data: `users_page:1` }
+          ]
+        ]
+      };
+      
+      await adminBot.sendMessage(chatId, infoText, { 
+        parse_mode: 'Markdown',
+        reply_markup: actionKeyboard
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id);
+      
+    } catch (error) {
+      console.error('❌ Ошибка получения инфо о пользователе:', error);
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка',
+        show_alert: true 
+      });
+    }
+    return;
+  }
+
   if (data.startsWith('user_orders:')) {
     const userId = parseInt(data.split(':')[1]);
     
@@ -2680,7 +2895,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ДИАЛОГИ ПОЛЬЗОВАТЕЛЯ =====
   if (data.startsWith('user_dialogs:')) {
     const userId = parseInt(data.split(':')[1]);
     
@@ -2733,7 +2947,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ПОПОЛНЕНИЕ БАЛАНСА (ПРОМПТ) =====
   if (data.startsWith('addbalance_prompt:')) {
     const userId = parseInt(data.split(':')[1]);
     
@@ -2751,7 +2964,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== СТАТИСТИКА ПОЛЬЗОВАТЕЛЯ =====
   if (data.startsWith('user_stats:')) {
     const userId = parseInt(data.split(':')[1]);
     
@@ -2803,7 +3015,7 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
-  // ===== ЗАКАЗЫ И ФИЛЬТРЫ =====
+
   if (data.startsWith('order_detail:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -3056,7 +3268,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== УПРАВЛЕНИЕ ЗАКАЗАМИ =====
   if (data.startsWith('request_code:')) {
     const orderId = data.split(':')[1];
     
@@ -3470,7 +3681,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ОТМЕНА ЗАКАЗА =====
   if (data.startsWith('cancel_order:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -3551,7 +3761,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ВОЗВРАТЫ =====
   if (data.startsWith('process_refund:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -3894,7 +4103,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ТОВАРЫ =====
   if (data === 'add_product_prompt') {
     await adminBot.answerCallbackQuery(cb.id);
     adminBot.sendMessage(chatId, '📝 Отправьте команду /add_product чтобы начать добавление товара');
@@ -4058,7 +4266,6 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== ВЫБОР ТИПА ТОВАРА (ПОДАРОК/НЕ ПОДАРОК) =====
   if (data.startsWith('set_gift:')) {
     const isGift = data.split(':')[1];
     const userState = userStates[chatId];
@@ -4130,14 +4337,11 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
 
-  // ===== НЕИЗВЕСТНАЯ КОМАНДА =====
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
     show_alert: true
   });
 });
-  
-
 
 async function handleDateFilter(msg, filterType, callbackQueryId) {
   const chatId = msg.chat.id;
@@ -4196,7 +4400,11 @@ async function showSupportDialog(msg, dialogId, callbackQueryId) {
         u.telegram_username,
         u.first_name,
         u.last_name,
-        u.avatar_url
+        u.avatar_url,
+        u.vk_first_name,
+        u.vk_last_name,
+        u.vk_email,
+        u.email
       FROM support_dialogs d
       JOIN users u ON d.user_id = u.id
       WHERE d.id = $1
@@ -4222,7 +4430,20 @@ async function showSupportDialog(msg, dialogId, callbackQueryId) {
     docContent += `================================\n\n`;
     docContent += `ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:\n`;
     docContent += `• ID в магазине: ${dialog.user_id}\n`;
-    docContent += `• Имя: ${dialog.username || 'Не указано'}\n`;
+    
+    // Отображаем имя (приоритет VK)
+    let displayName = dialog.username || 'Не указано';
+    if (dialog.vk_first_name || dialog.vk_last_name) {
+      displayName = `${dialog.vk_first_name || ''} ${dialog.vk_last_name || ''}`.trim();
+    }
+    docContent += `• Имя: ${displayName}\n`;
+    
+    // Отображаем email (приоритет VK)
+    const displayEmail = dialog.vk_email || dialog.email;
+    if (displayEmail) {
+      docContent += `• Email: ${displayEmail}\n`;
+    }
+    
     docContent += `• TG ID: ${dialog.tg_id}\n`;
     docContent += `• Username: @${dialog.telegram_username || 'отсутствует'}\n`;
     docContent += `• Имя в TG: ${dialog.first_name || ''} ${dialog.last_name || ''}`.trim() || 'Не указано';
@@ -4245,7 +4466,7 @@ async function showSupportDialog(msg, dialogId, callbackQueryId) {
       Buffer.from(docContent, 'utf-8'),
       {
         filename: `support_dialog_${dialogId}.txt`,
-        caption: `💬 Диалог #${dialogId} с пользователем ${dialog.username || 'ID ' + dialog.user_id}`
+        caption: `💬 Диалог #${dialogId} с пользователем ${displayName || 'ID ' + dialog.user_id}`
       }
     );
     
@@ -4262,7 +4483,10 @@ async function showSupportDialog(msg, dialogId, callbackQueryId) {
     };
     
     let statusText = `📋 **Управление диалогом #${dialogId}**\n\n`;
-    statusText += `**Пользователь:** ${dialog.username || 'Неизвестно'}\n`;
+    statusText += `**Пользователь:** ${displayName || 'Неизвестно'}\n`;
+    if (displayEmail) {
+      statusText += `**Email:** ${displayEmail}\n`;
+    }
     statusText += `**Статус:** ${dialog.status === 'active' ? '✅ Активен' : '❌ Закрыт'}\n`;
     statusText += `**Сообщений:** ${messages.rows.length}\n`;
     
@@ -4305,7 +4529,20 @@ async function showUserInfo(msg, userId, callbackQueryId) {
     
     let infoText = `👤 **Информация о пользователе**\n\n`;
     infoText += `**ID в магазине:** ${user.id}\n`;
-    infoText += `**Имя:** ${user.username || 'Не указано'}\n`;
+    
+    // Отображаем имя (приоритет VK)
+    let displayName = user.username || 'Не указано';
+    if (user.vk_first_name || user.vk_last_name) {
+      displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
+    }
+    infoText += `**Имя:** ${displayName}\n`;
+    
+    // Отображаем email (приоритет VK)
+    const displayEmail = user.vk_email || user.email;
+    if (displayEmail) {
+      infoText += `**Email:** ${displayEmail}\n`;
+    }
+    
     infoText += `**TG ID:** ${user.tg_id}\n`;
     infoText += `**Telegram Username:** @${user.telegram_username || 'отсутствует'}\n`;
     infoText += `**Имя в TG:** ${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Не указано';
@@ -4336,7 +4573,7 @@ adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
   let query = `
     SELECT 
       d.id, d.status, d.updated_at, d.created_at,
-      u.username, u.tg_id, u.first_name, u.last_name,
+      u.username, u.tg_id, u.first_name, u.last_name, u.email, u.vk_email, u.vk_first_name, u.vk_last_name,
       (SELECT COUNT(*) FROM support_messages WHERE dialog_id = d.id) as msg_count
     FROM support_dialogs d
     JOIN users u ON d.user_id = u.id
@@ -4365,8 +4602,17 @@ adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
       inline_keyboard: rows.map(row => {
         const date = new Date(row.updated_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
         const statusEmoji = row.status === 'active' ? '🟢' : '🔴';
-        const name = row.username || row.first_name || `ID ${row.tg_id}`;
+        
+        // Определяем отображаемое имя (приоритет VK)
+        let name = row.username || '';
+        if (row.vk_first_name || row.vk_last_name) {
+          name = `${row.vk_first_name || ''} ${row.vk_last_name || ''}`.trim();
+        }
+        if (!name && row.tg_id) {
+          name = `ID ${row.tg_id}`;
+        }
         const shortName = name.length > 18 ? name.substring(0, 15) + '…' : name;
+        
         return [{
           text: `${statusEmoji} #${row.id} | ${shortName} | ${row.msg_count} смс | ${date}`,
           callback_data: `support_view:${row.id}`
@@ -4387,7 +4633,6 @@ adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
   }
 });
 
-// ===== КОМАНДА /users - СПИСОК ПОЛЬЗОВАТЕЛЕЙ =====
 adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
@@ -4397,7 +4642,6 @@ adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
   const offset = (page - 1) * limit;
   
   try {
-    // Получаем общее количество пользователей
     const countResult = await pool.query('SELECT COUNT(*) as total FROM users');
     const totalUsers = parseInt(countResult.rows[0].total);
     const totalPages = Math.ceil(totalUsers / limit);
@@ -4406,11 +4650,13 @@ adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
       return adminBot.sendMessage(chatId, '📭 Нет зарегистрированных пользователей');
     }
     
-    // Получаем пользователей с пагинацией
     const result = await pool.query(`
       SELECT 
         id, 
-        username, 
+        username,
+        vk_first_name,
+        vk_last_name,
+        vk_email,
         COALESCE(tg_id, 0) as tg_id,
         auth_provider,
         created_at,
@@ -4428,34 +4674,36 @@ adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
     result.rows.forEach((user, index) => {
       const userNumber = offset + index + 1;
       
-      // Определяем иконку провайдера
       let providerIcon = '📧';
       if (user.auth_provider === 'telegram') providerIcon = '📱';
-      else if (user.auth_provider === 'yandex') providerIcon = 'Я';
-      else if (user.auth_provider === 'yandex+telegram') providerIcon = '🔗';
+      else if (user.auth_provider === 'vk') providerIcon = '📱';
+      else if (user.auth_provider === 'vk+telegram') providerIcon = '🔗';
       
-      // Форматируем дату
       const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
       
-      // Определяем отображаемое имя
+      // Определяем отображаемое имя (приоритет VK)
       let displayName = user.username || 'Без имени';
+      if (user.vk_first_name || user.vk_last_name) {
+        displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
+      }
       if (displayName.length > 20) {
         displayName = displayName.substring(0, 17) + '...';
       }
       
       text += `${userNumber}. ${providerIcon} *${displayName}*\n`;
       text += `   🆔 ID: \`${user.id}\`\n`;
+      if (user.vk_email) {
+        text += `   📧 VK: ${user.vk_email.substring(0, 15)}...\n`;
+      }
       text += `   📱 TG ID: ${user.tg_id !== 0 ? '`' + user.tg_id + '`' : '—'}\n`;
       text += `   📦 Заказов: ${user.orders_count}\n`;
       text += `   📅 Регистрация: ${createdDate}\n\n`;
       
-      // Добавляем кнопку для просмотра деталей
       inlineKeyboard.push([
         { text: `👤 Пользователь #${user.id}`, callback_data: `support_userinfo:${user.id}` }
       ]);
     });
     
-    // Кнопки пагинации
     const paginationButtons = [];
     if (page > 1) {
       paginationButtons.push({ text: '⬅️ Назад', callback_data: `users_page:${page-1}` });
@@ -4467,7 +4715,6 @@ adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
       inlineKeyboard.push(paginationButtons);
     }
     
-    // Кнопка для обновления
     inlineKeyboard.push([
       { text: '🔄 Обновить', callback_data: `users_page:${page}` }
     ]);
@@ -5902,16 +6149,12 @@ app.post('/api/user/avatar', upload.single('avatar'), async (req, res) => {
     
     let processedImage = req.file.buffer;
     try {
-      // Читаем метаданные изображения для определения ориентации
       const metadata = await sharp(req.file.buffer).metadata();
       
-      // Создаем цепочку обработки
       let sharpInstance = sharp(req.file.buffer);
       
-      // Автоматически поворачиваем изображение на основе EXIF данных
       sharpInstance = sharpInstance.rotate();
       
-      // Изменяем размер
       processedImage = await sharpInstance
         .resize(400, 400, { 
           fit: 'cover',
@@ -5925,7 +6168,6 @@ app.post('/api/user/avatar', upload.single('avatar'), async (req, res) => {
         
     } catch (sharpError) {
       console.error('Ошибка обработки изображения:', sharpError);
-      // Если ошибка, пробуем без обработки
       processedImage = req.file.buffer;
     }
     
@@ -5984,7 +6226,6 @@ app.post('/api/user/username', async (req, res) => {
   }
 });
 
-
 // Отвязка Telegram аккаунта
 app.post('/api/user/unlink-telegram', async (req, res) => {
   try {
@@ -5994,7 +6235,6 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing user ID' });
     }
     
-    // Получаем текущего пользователя с его Telegram данными
     const userResult = await pool.query(
       'SELECT id, username, tg_id, telegram_username, auth_provider FROM users WHERE id = $1',
       [userId]
@@ -6009,7 +6249,6 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
     const oldTgId = user.tg_id;
     const oldTgUsername = user.telegram_username;
     
-    // Проверяем, можно ли отвязать Telegram
     if (currentProvider === 'telegram') {
       return res.status(400).json({ 
         success: false, 
@@ -6017,13 +6256,11 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       });
     }
     
-    // Определяем новый провайдер
-    let newProvider = 'yandex';
-    if (currentProvider === 'yandex+telegram') {
-      newProvider = 'yandex';
+    let newProvider = 'vk';
+    if (currentProvider === 'vk+telegram') {
+      newProvider = 'vk';
     }
     
-    // Обновляем пользователя - убираем все Telegram данные
     await pool.query(
       `UPDATE users SET 
         tg_id = NULL,
@@ -6036,7 +6273,6 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       [newProvider, userId]
     );
     
-    // Если у пользователя была аватарка из Telegram, но нет своей, удаляем её
     const userWithAvatar = await pool.query(
       'SELECT avatar_url, telegram_avatar_url FROM users WHERE id = $1',
       [userId]
@@ -6050,7 +6286,6 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       );
     }
     
-    // ===== ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ В TELEGRAM =====
     if (oldTgId) {
       try {
         const keyboard = {
@@ -6069,7 +6304,7 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
           `📌 *Что изменилось:*\n` +
           `• Вы больше не можете входить через Telegram\n` +
           `• Уведомления о заказах больше не будут приходить сюда\n` +
-          `• Ваш аккаунт в магазине сохранен (вход через Яндекс)\n\n` +
+          `• Ваш аккаунт в магазине сохранен (вход через VK ID)\n\n` +
           `💡 *Хотите привязать снова?*\n` +
           `Зайдите в профиль на сайте и нажмите "Привязать Telegram"`,
           { 
@@ -6084,7 +6319,6 @@ app.post('/api/user/unlink-telegram', async (req, res) => {
       }
     }
     
-    // Уведомление админу (опционально)
     try {
       await adminBot.sendMessage(
         ADMIN_ID,
@@ -6122,18 +6356,29 @@ app.post('/api/user/link-telegram', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Telegram already linked to another account' });
     }
     
+    // Определяем новый провайдер
+    const userResult = await pool.query(
+      'SELECT auth_provider FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    let newProvider = 'telegram';
+    if (userResult.rows.length > 0) {
+      const currentProvider = userResult.rows[0].auth_provider;
+      if (currentProvider === 'vk') {
+        newProvider = 'vk+telegram';
+      }
+    }
+    
     await pool.query(
       `UPDATE users SET 
         tg_id = $1,
         telegram_username = $2,
         first_name = $3,
         last_name = $4,
-        auth_provider = CASE 
-          WHEN auth_provider = 'yandex' THEN 'yandex+telegram'
-          ELSE 'telegram'
-        END
-       WHERE id = $5`,
-      [tgId, telegramUsername, firstName, lastName, userId]
+        auth_provider = $5
+       WHERE id = $6`,
+      [tgId, telegramUsername, firstName, lastName, newProvider, userId]
     );
     
     res.json({ success: true });
@@ -6282,18 +6527,25 @@ app.post('/api/support/message', upload.single('file'), async (req, res) => {
     );
 
     const userResult = await pool.query(
-  'SELECT username FROM users WHERE id = $1',
-  [user_id]
-);
-const username = userResult.rows[0]?.username || `ID ${user_id}`;
+      'SELECT username, vk_first_name, vk_last_name, email, vk_email FROM users WHERE id = $1',
+      [user_id]
+    );
+    
+    let displayName = `ID ${user_id}`;
+    if (userResult.rows.length > 0) {
+      const u = userResult.rows[0];
+      if (u.vk_first_name || u.vk_last_name) {
+        displayName = `${u.vk_first_name || ''} ${u.vk_last_name || ''}`.trim();
+      } else if (u.username) {
+        displayName = u.username;
+      }
+    }
 
-let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 Пользователь ID: ${user_id}\n`;
-if (username) {
-  adminMessage += `📝 Имя: ${username}\n`;
-}
-if (message) {
-  adminMessage += `💬 ${message}\n`;
-}
+    let adminMessage = `💬 Новое сообщение в диалоге #${dialogId}\n\n👤 Пользователь: ${displayName}\n`;
+    if (message) {
+      adminMessage += `💬 ${message}\n`;
+    }
+    
     const keyboard = {
       inline_keyboard: [
         [
@@ -6853,7 +7105,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
       
       if (session.type === 'auth_success') {
         const userResult = await pool.query(
-          'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url FROM users WHERE id = $1',
+          'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url, email, vk_email, vk_first_name, vk_last_name, vk_avatar_url FROM users WHERE id = $1',
           [session.userId]
         );
         
@@ -6876,11 +7128,12 @@ app.get('/api/auth/check/:token', async (req, res) => {
             id: user.id,
             tgId: user.tg_id,
             username: user.username,
-            firstName: user.first_name,
-            lastName: user.last_name,
+            firstName: user.vk_first_name || user.first_name,
+            lastName: user.vk_last_name || user.last_name,
             telegramUsername: user.telegram_username,
             auth_provider: user.auth_provider,
-            avatarUrl: user.avatar_url
+            avatarUrl: user.vk_avatar_url || user.avatar_url,
+            email: user.vk_email || user.email
           }
         });
       }
@@ -6904,7 +7157,6 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
-// ВСТАВИТЬ вместо него этот новый маршрут:
 app.get('/api/auth/profile/:userId', async (req, res) => {
   const userId = req.params.userId;
 
@@ -6921,7 +7173,8 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
     const userResult = await pool.query(
       `SELECT
         id, tg_id, username, first_name, last_name,
-        telegram_username, auth_provider, avatar_url, created_at
+        telegram_username, auth_provider, avatar_url, created_at,
+        email, vk_email, vk_first_name, vk_last_name, vk_avatar_url
        FROM users WHERE id = $1`,
       [userId]
     );
@@ -6958,17 +7211,24 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
       isActive: !['completed', 'canceled', 'manyback'].includes(order.status)
     }));
 
+    // Определяем отображаемые данные (приоритет VK)
+    const displayFirstName = user.vk_first_name || user.first_name;
+    const displayLastName = user.vk_last_name || user.last_name;
+    const displayEmail = user.vk_email || user.email;
+    const displayAvatar = user.vk_avatar_url || user.avatar_url;
+
     res.json({
       success: true,
       user: {
         id: user.id,
         tgId: user.tg_id,
         username: user.username,
-        firstName: user.first_name,
-        lastName: user.last_name,
+        firstName: displayFirstName,
+        lastName: displayLastName,
         telegramUsername: user.telegram_username,
         auth_provider: user.auth_provider,
-        avatarUrl: user.avatar_url,
+        avatarUrl: displayAvatar,
+        email: displayEmail,
         createdAt: user.created_at
       },
       orders: orders
@@ -6979,184 +7239,6 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-
-// ============================================================================
-// Загрузка данных профиля (исправленная версия с параметром в пути)
-// ============================================================================
-async function loadProfileData() {
-  if (!currentUser?.id) {
-    console.warn("[PROFILE] Нет userId в currentUser → редирект на авторизацию");
-    window.location.href = 'reg_log.html';
-    return;
-  }
-
-  console.log("[PROFILE] Запрашиваем данные для пользователя ID:", currentUser.id);
-  console.log("[PROFILE] URL запроса:", `${API_URL}/api/auth/profile/${currentUser.id}`);
-
-  showScreen('loading');
-
-  try {
-    const response = await fetch(`${API_URL}/api/auth/profile/${currentUser.id}`, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Cache-Control': 'no-cache'  // чтобы не кэшировались старые данные
-      }
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Нет текста ошибки');
-      throw new Error(`HTTP ${response.status} — ${errorText || response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    if (!data.success) {
-      throw new Error(data.error || 'Сервер вернул ошибку без описания');
-    }
-
-    if (!data.user) {
-      throw new Error('В ответе отсутствует объект user');
-    }
-
-    // Обновляем текущего пользователя
-    currentUser = {
-      ...currentUser,
-      ...data.user,
-      // на всякий случай сохраняем id явно
-      id: data.user.id || currentUser.id
-    };
-
-    saveUser(currentUser);
-    updateProfileUI(currentUser);
-
-    // Загружаем заказы
-    await loadOrders(data.orders || []);
-
-    showScreen('profile');
-
-    console.log("[PROFILE] Данные успешно загружены");
-  } catch (error) {
-    console.error("[PROFILE] Ошибка при загрузке профиля:", error);
-    showError(
-      'Ошибка загрузки профиля',
-      error.message.includes('404') 
-        ? 'Пользователь не найден на сервере'
-        : error.message.includes('400')
-          ? 'Некорректный запрос (возможно, неверный ID)'
-          : 'Не удалось подключиться к серверу или произошла ошибка'
-    );
-  }
-}
-
-
-function updateProfileUI(user) {
-  const avatar = document.getElementById('profileAvatar');
-  const editAvatarPreview = document.getElementById('editAvatarPreview');
-  
-  const firstLetter = user.username 
-    ? user.username.charAt(0).toUpperCase() 
-    : 'U';
-
-  const avatarHtml = user.avatarUrl
-    ? `<img src="${user.avatarUrl}" alt="${user.username || 'Аватар'}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><circle cx=%2750%27 cy=%2750%27 r=%2740%27 fill=%27%23667eea%27/><text x=%2750%27 y=%2760%27 font-size=%2740%27 text-anchor=%27middle%27 fill=%27white%27>${firstLetter}</text></svg>')">`
-    : `<div class="avatar-placeholder">${firstLetter}</div>`;
-
-  // Обновляем аватар на главной странице профиля
-  avatar.innerHTML = avatarHtml + '<div class="edit-avatar-overlay">Изменить фото</div>';
-
-  // Обновляем превью в модальном окне редактирования
-  if (editAvatarPreview) {
-    editAvatarPreview.innerHTML = avatarHtml;
-  }
-
-  // Имя
-  document.getElementById('profileName').textContent = user.username || 'Пользователь';
-
-  const provider = user.auth_provider || 'email';
-  const profileId = document.getElementById('profileId');
-  const profileUsername = document.getElementById('profileUsername');
-  const telegramLinkBtn = document.getElementById('telegramLinkBtn');
-  const telegramLinkText = document.getElementById('telegramLinkText');
-
-  if (provider === 'telegram' || provider === 'yandex+telegram') {
-    profileId.textContent = `TG ID: ${user.tgId || '...'}`;
-    profileUsername.textContent = user.telegramUsername ? `@${user.telegramUsername}` : '';
-    profileUsername.style.display = user.telegramUsername ? 'block' : 'none';
-
-    telegramLinkBtn.classList.add('linked');
-    telegramLinkText.textContent = 'Telegram привязан';
-
-    document.getElementById('telegramStatus').classList.add('linked');
-    document.getElementById('telegramName').textContent = user.firstName || user.username || 'Пользователь';
-    document.getElementById('telegramUser').textContent = user.telegramUsername ? `@${user.telegramUsername}` : '—';
-    document.getElementById('unlinkTelegramBtn').style.display = 'block';
-    document.getElementById('linkTelegramBtn').style.display = 'none';
-  } else {
-    profileId.textContent = 'Аккаунт Яндекс';
-    profileUsername.style.display = 'none';
-
-    telegramLinkBtn.classList.remove('linked');
-    telegramLinkText.textContent = 'Привязать Telegram';
-
-    document.getElementById('telegramStatus').classList.remove('linked');
-    document.getElementById('telegramName').textContent = 'Не привязан';
-    document.getElementById('telegramUser').textContent = '—';
-    document.getElementById('unlinkTelegramBtn').style.display = 'none';
-    document.getElementById('linkTelegramBtn').style.display = 'block';
-  }
-}
-
-
-async function loadOrders(orders = []) {
-  const list = document.getElementById('ordersList');
-  const count = document.getElementById('ordersCount');
-
-  if (!list || !count) return;
-
-  count.textContent = orders.length;
-
-  if (orders.length === 0) {
-    list.innerHTML = `
-      <div class="no-orders">
-        <div class="sticker-small" id="noOrdersAnim"></div>
-        <div class="no-orders-text">У вас пока нет заказов</div>
-        <div class="no-orders-subtext">Совершите первую покупку чтобы начать историю!</div>
-      </div>
-    `;
-    setTimeout(() => {
-      loadNoOrdersAnimation();
-    }, 100);
-    return;
-  }
-
-  
-  orders.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-  list.innerHTML = orders.map(order => {
-    const status = getDisplayStatus(order.status, order.paymentStatus, order.refundAmount);
-    const isGrayed = ['canceled', 'manyback'].includes(order.status);
-
-    return `
-      <div class="order-item ${isGrayed ? 'grayed' : ''}" 
-           onclick="window.location.href='moreorder.html?order=${order.id}'">
-        <div class="order-header">
-          <div class="order-id">#${order.id}</div>
-          <div class="order-date">${formatDate(order.date)}</div>
-        </div>
-        <div class="order-details">
-          <div class="order-total">${fmtRub(order.total)}</div>
-          <div class="order-status ${status.className}">${status.text}</div>
-        </div>
-        ${order.refundAmount 
-            ? `<div style="font-size: 12px; color: #9c27b0; margin-top: 8px;">
-                 Возврат: ${fmtRub(order.refundAmount)}
-               </div>` 
-            : ''}
-      </div>
-    `;
-  }).join('');
-}
 
 app.post('/api/auth/logout', async (req, res) => {
   try {
