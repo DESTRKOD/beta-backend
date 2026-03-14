@@ -6904,6 +6904,82 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
+// ВСТАВИТЬ вместо него этот новый маршрут:
+app.get('/api/auth/profile/:userId', async (req, res) => {
+  const userId = req.params.userId;
+
+  console.log(`[PROFILE] Запрос профиля для userId из пути: ${userId}`);
+
+  if (!userId || isNaN(parseInt(userId))) {
+    return res.status(400).json({
+      success: false,
+      error: 'Valid numeric userId is required in URL path (example: /api/auth/profile/123)'
+    });
+  }
+
+  try {
+    const userResult = await pool.query(
+      `SELECT
+        id, tg_id, username, first_name, last_name,
+        telegram_username, auth_provider, avatar_url, created_at
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      console.log(`[PROFILE] Пользователь с ID ${userId} не найден`);
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const user = userResult.rows[0];
+
+    const ordersResult = await pool.query(
+      `SELECT
+        order_id as id, total, status, payment_status, code,
+        code_requested, wrong_code_attempts, created_at as date, refund_amount
+       FROM orders
+       WHERE user_id = $1
+         AND (payment_status = 'confirmed'
+              OR status IN ('waiting', 'waiting_code_request', 'completed', 'manyback'))
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    const orders = ordersResult.rows.map(order => ({
+      id: order.id,
+      total: order.total,
+      status: order.status,
+      date: order.date,
+      code: order.code,
+      refundAmount: order.refund_amount,
+      codeRequested: order.code_requested,
+      wrongAttempts: order.wrong_code_attempts,
+      paymentStatus: order.payment_status,
+      isActive: !['completed', 'canceled', 'manyback'].includes(order.status)
+    }));
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        tgId: user.tg_id,
+        username: user.username,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        telegramUsername: user.telegram_username,
+        auth_provider: user.auth_provider,
+        avatarUrl: user.avatar_url,
+        createdAt: user.created_at
+      },
+      orders: orders
+    });
+
+  } catch (error) {
+    console.error(`[PROFILE] Ошибка при обработке /api/auth/profile/${userId}:`, error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 // ============================================================================
 // Загрузка данных профиля (исправленная версия с параметром в пути)
 // ============================================================================
