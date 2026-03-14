@@ -6904,90 +6904,183 @@ app.get('/api/auth/check/:token', async (req, res) => {
   }
 });
 
-// ===== ПОЛУЧЕНИЕ ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ =====
-app.get('/api/auth/profile', async (req, res) => {
+// ============================================================================
+// Загрузка данных профиля (исправленная версия с параметром в пути)
+// ============================================================================
+async function loadProfileData() {
+  if (!currentUser?.id) {
+    console.warn("[PROFILE] Нет userId в currentUser → редирект на авторизацию");
+    window.location.href = 'reg_log.html';
+    return;
+  }
+
+  console.log("[PROFILE] Запрашиваем данные для пользователя ID:", currentUser.id);
+  console.log("[PROFILE] URL запроса:", `${API_URL}/api/auth/profile/${currentUser.id}`);
+
+  showScreen('loading');
+
   try {
-    // Приоритет 1: ID из сессии Passport (самый правильный способ)
-    let userId = req.session?.passport?.user;
-
-    // Приоритет 2: Если в сессии нет, берем из query-параметра (для отладки)
-    if (!userId) {
-      userId = req.query.userId;
-    }
-
-    // Если ID всё еще нет — это ошибка запроса
-    if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'User ID is required. Provide ?userId= or login first.' 
-      });
-    }
-
-    console.log(`[PROFILE] Запрос профиля для user ID: ${userId}`);
-
-    // Получаем данные пользователя
-    const userResult = await pool.query(
-      `SELECT 
-        id, tg_id, username, first_name, last_name, 
-        telegram_username, auth_provider, avatar_url, created_at 
-       FROM users WHERE id = $1`,
-      [userId]
-    );
-    
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-    
-    const user = userResult.rows[0];
-
-    // Получаем заказы пользователя
-    const ordersResult = await pool.query(
-      `SELECT 
-        order_id as id, total, status, payment_status, code, 
-        code_requested, wrong_code_attempts, created_at as date, refund_amount
-       FROM orders 
-       WHERE user_id = $1 
-         AND (payment_status = 'confirmed' 
-              OR status IN ('waiting', 'waiting_code_request', 'completed', 'manyback'))
-       ORDER BY created_at DESC`,
-      [userId]
-    );
-    
-    const orders = ordersResult.rows.map(order => ({
-      id: order.id,
-      total: order.total,
-      status: order.status,
-      date: order.date,
-      code: order.code,
-      refundAmount: order.refund_amount,
-      codeRequested: order.code_requested,
-      wrongAttempts: order.wrong_code_attempts,
-      paymentStatus: order.payment_status,
-      isActive: !['completed', 'canceled', 'manyback'].includes(order.status)
-    }));
-    
-    // Отправляем ответ
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        tgId: user.tg_id,
-        username: user.username,
-        firstName: user.first_name,
-        lastName: user.last_name,
-        telegramUsername: user.telegram_username,
-        auth_provider: user.auth_provider,
-        avatarUrl: user.avatar_url,
-        createdAt: user.created_at
-      },
-      orders: orders
+    const response = await fetch(`${API_URL}/api/auth/profile/${currentUser.id}`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'  // чтобы не кэшировались старые данные
+      }
     });
 
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Нет текста ошибки');
+      throw new Error(`HTTP ${response.status} — ${errorText || response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.success) {
+      throw new Error(data.error || 'Сервер вернул ошибку без описания');
+    }
+
+    if (!data.user) {
+      throw new Error('В ответе отсутствует объект user');
+    }
+
+    // Обновляем текущего пользователя
+    currentUser = {
+      ...currentUser,
+      ...data.user,
+      // на всякий случай сохраняем id явно
+      id: data.user.id || currentUser.id
+    };
+
+    saveUser(currentUser);
+    updateProfileUI(currentUser);
+
+    // Загружаем заказы
+    await loadOrders(data.orders || []);
+
+    showScreen('profile');
+
+    console.log("[PROFILE] Данные успешно загружены");
   } catch (error) {
-    console.error('❌ Ошибка в /api/auth/profile:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    console.error("[PROFILE] Ошибка при загрузке профиля:", error);
+    showError(
+      'Ошибка загрузки профиля',
+      error.message.includes('404') 
+        ? 'Пользователь не найден на сервере'
+        : error.message.includes('400')
+          ? 'Некорректный запрос (возможно, неверный ID)'
+          : 'Не удалось подключиться к серверу или произошла ошибка'
+    );
   }
-});
+}
+
+
+function updateProfileUI(user) {
+  const avatar = document.getElementById('profileAvatar');
+  const editAvatarPreview = document.getElementById('editAvatarPreview');
+  
+  const firstLetter = user.username 
+    ? user.username.charAt(0).toUpperCase() 
+    : 'U';
+
+  const avatarHtml = user.avatarUrl
+    ? `<img src="${user.avatarUrl}" alt="${user.username || 'Аватар'}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><circle cx=%2750%27 cy=%2750%27 r=%2740%27 fill=%27%23667eea%27/><text x=%2750%27 y=%2760%27 font-size=%2740%27 text-anchor=%27middle%27 fill=%27white%27>${firstLetter}</text></svg>')">`
+    : `<div class="avatar-placeholder">${firstLetter}</div>`;
+
+  // Обновляем аватар на главной странице профиля
+  avatar.innerHTML = avatarHtml + '<div class="edit-avatar-overlay">Изменить фото</div>';
+
+  // Обновляем превью в модальном окне редактирования
+  if (editAvatarPreview) {
+    editAvatarPreview.innerHTML = avatarHtml;
+  }
+
+  // Имя
+  document.getElementById('profileName').textContent = user.username || 'Пользователь';
+
+  const provider = user.auth_provider || 'email';
+  const profileId = document.getElementById('profileId');
+  const profileUsername = document.getElementById('profileUsername');
+  const telegramLinkBtn = document.getElementById('telegramLinkBtn');
+  const telegramLinkText = document.getElementById('telegramLinkText');
+
+  if (provider === 'telegram' || provider === 'yandex+telegram') {
+    profileId.textContent = `TG ID: ${user.tgId || '...'}`;
+    profileUsername.textContent = user.telegramUsername ? `@${user.telegramUsername}` : '';
+    profileUsername.style.display = user.telegramUsername ? 'block' : 'none';
+
+    telegramLinkBtn.classList.add('linked');
+    telegramLinkText.textContent = 'Telegram привязан';
+
+    document.getElementById('telegramStatus').classList.add('linked');
+    document.getElementById('telegramName').textContent = user.firstName || user.username || 'Пользователь';
+    document.getElementById('telegramUser').textContent = user.telegramUsername ? `@${user.telegramUsername}` : '—';
+    document.getElementById('unlinkTelegramBtn').style.display = 'block';
+    document.getElementById('linkTelegramBtn').style.display = 'none';
+  } else {
+    profileId.textContent = 'Аккаунт Яндекс';
+    profileUsername.style.display = 'none';
+
+    telegramLinkBtn.classList.remove('linked');
+    telegramLinkText.textContent = 'Привязать Telegram';
+
+    document.getElementById('telegramStatus').classList.remove('linked');
+    document.getElementById('telegramName').textContent = 'Не привязан';
+    document.getElementById('telegramUser').textContent = '—';
+    document.getElementById('unlinkTelegramBtn').style.display = 'none';
+    document.getElementById('linkTelegramBtn').style.display = 'block';
+  }
+}
+
+
+async function loadOrders(orders = []) {
+  const list = document.getElementById('ordersList');
+  const count = document.getElementById('ordersCount');
+
+  if (!list || !count) return;
+
+  count.textContent = orders.length;
+
+  if (orders.length === 0) {
+    list.innerHTML = `
+      <div class="no-orders">
+        <div class="sticker-small" id="noOrdersAnim"></div>
+        <div class="no-orders-text">У вас пока нет заказов</div>
+        <div class="no-orders-subtext">Совершите первую покупку чтобы начать историю!</div>
+      </div>
+    `;
+    setTimeout(() => {
+      loadNoOrdersAnimation();
+    }, 100);
+    return;
+  }
+
+  
+  orders.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  list.innerHTML = orders.map(order => {
+    const status = getDisplayStatus(order.status, order.paymentStatus, order.refundAmount);
+    const isGrayed = ['canceled', 'manyback'].includes(order.status);
+
+    return `
+      <div class="order-item ${isGrayed ? 'grayed' : ''}" 
+           onclick="window.location.href='moreorder.html?order=${order.id}'">
+        <div class="order-header">
+          <div class="order-id">#${order.id}</div>
+          <div class="order-date">${formatDate(order.date)}</div>
+        </div>
+        <div class="order-details">
+          <div class="order-total">${fmtRub(order.total)}</div>
+          <div class="order-status ${status.className}">${status.text}</div>
+        </div>
+        ${order.refundAmount 
+            ? `<div style="font-size: 12px; color: #9c27b0; margin-top: 8px;">
+                 Возврат: ${fmtRub(order.refundAmount)}
+               </div>` 
+            : ''}
+      </div>
+    `;
+  }).join('');
+}
 
 app.post('/api/auth/logout', async (req, res) => {
   try {
