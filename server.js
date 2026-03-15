@@ -4535,16 +4535,17 @@ async function handleAddGameStep(msg, userState) {
   try {
     switch(userState.step) {
       case 'awaiting_name':
-        if (text.length < 2 || text.length > 50) {
-          adminBot.sendMessage(chatId, '❌ Название должно быть от 2 до 50 символов');
+        if (text.length < 2 || text.length > 100) {
+          adminBot.sendMessage(chatId, '❌ Название должно быть от 2 до 100 символов. Введите название еще раз:');
           return;
         }
-        userState.gameData = { name: text };
-        userState.step = 'awaiting_icon';
-        adminBot.sendMessage(
-          chatId, 
-          '✅ Название сохранено\n\nШаг 2/3: Введите URL изображения (иконки) игры:'
-        );
+  
+        userState.productData = { 
+          ...userState.productData,  // сохраняем game_id и другие поля
+          name: text 
+        };
+        userState.step = 'awaiting_price';
+        adminBot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/4: Введите цену товара (в рублях, только цифры):');
         break;
         
       case 'awaiting_icon':
