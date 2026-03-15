@@ -199,10 +199,8 @@ passport.use('vkontakte', new OAuth2Strategy({
         return done(new Error('Database connection error'), null);
       }
 
-      // Получаем email из параметров (VK возвращает email отдельно)
       const email = params.email || null;
 
-      // Получаем данные пользователя из VK API
       const userInfoResponse = await axios.get('https://api.vk.com/method/users.get', {
         params: {
           access_token: accessToken,
@@ -222,7 +220,6 @@ passport.use('vkontakte', new OAuth2Strategy({
       const lastName = vkProfile.last_name || '';
       const photoUrl = vkProfile.photo_200 || null;
       
-      // Формируем имя пользователя
       let displayName = firstName;
       if (lastName) {
         displayName = `${firstName} ${lastName}`;
@@ -231,17 +228,14 @@ passport.use('vkontakte', new OAuth2Strategy({
         displayName = `VK User ${vkId}`;
       }
 
-      // Ищем пользователя по vk_id
       let user = await pool.query(
         'SELECT * FROM users WHERE vk_id = $1',
         [vkId]
       );
 
       if (user.rows.length === 0) {
-        // ===== НОВЫЙ ПОЛЬЗОВАТЕЛЬ =====
         console.log('📝 Регистрация нового пользователя через VK ID');
         
-        // Проверяем уникальность имени
         let baseUsername = displayName;
         let username = baseUsername;
         let counter = 1;
@@ -258,7 +252,6 @@ passport.use('vkontakte', new OAuth2Strategy({
           counter++;
         }
         
-        // Создаем нового пользователя
         const newUser = await pool.query(
           `INSERT INTO users (
             username,
@@ -290,7 +283,6 @@ passport.use('vkontakte', new OAuth2Strategy({
         console.log(`✅ Новый пользователь создан: ID ${user.rows[0].id}, username: ${username}`);
         
       } else {
-        // ===== СУЩЕСТВУЮЩИЙ ПОЛЬЗОВАТЕЛЬ =====
         console.log(`🔄 Обновление данных пользователя ID: ${user.rows[0].id}`);
         
         const currentProvider = user.rows[0].auth_provider;
@@ -301,7 +293,6 @@ passport.use('vkontakte', new OAuth2Strategy({
           console.log('📌 Сохраняем привязку Telegram');
         }
         
-        // Обновляем данные пользователя
         user = await pool.query(
           `UPDATE users SET 
             last_login = CURRENT_TIMESTAMP,
@@ -338,7 +329,6 @@ passport.use('vkontakte', new OAuth2Strategy({
 
 // ===== VK AUTH ROUTES =====
 app.get('/api/auth/vk', (req, res, next) => {
-  // Перенаправляем на VK ID
   const vkAuthUrl = 'https://id.vk.com/auth?' + new URLSearchParams({
     app_id: process.env.VK_CLIENT_ID,
     redirect_uri: `${SERVER_URL}/api/auth/vk/callback`,
@@ -360,7 +350,6 @@ app.get('/api/auth/vk/callback', async (req, res, next) => {
   }
   
   try {
-    // Обмениваем код на токен
     const tokenResponse = await axios.get('https://oauth.vk.com/access_token', {
       params: {
         client_id: process.env.VK_CLIENT_ID,
@@ -375,7 +364,6 @@ app.get('/api/auth/vk/callback', async (req, res, next) => {
     const accessToken = tokenData.access_token;
     const email = tokenData.email || null;
 
-    // Получаем данные пользователя
     const userInfoResponse = await axios.get('https://api.vk.com/method/users.get', {
       params: {
         access_token: accessToken,
@@ -403,7 +391,6 @@ app.get('/api/auth/vk/callback', async (req, res, next) => {
       displayName = `VK User ${vkId}`;
     }
 
-    // Ищем или создаем пользователя
     let user = await pool.query(
       'SELECT * FROM users WHERE vk_id = $1',
       [vkId]
@@ -587,7 +574,6 @@ async function initDB() {
     `);
     console.log('✅ Базовая таблица users создана');
 
-    // Сначала удаляем старые Яндекс колонки (если они были)
     const yandexColumns = [
       'yandex_id', 'yandex_email', 'yandex_first_name', 'yandex_last_name',
       'yandex_display_name', 'yandex_avatar_url'
@@ -602,7 +588,6 @@ async function initDB() {
       }
     }
 
-    // Добавляем новые колонки для VK
     const vkColumnsToAdd = [
       { name: 'username', type: 'VARCHAR(100)' },
       { name: 'email', type: 'VARCHAR(255)' },
@@ -665,8 +650,6 @@ async function initDB() {
     `);
     console.log('✅ Таблица orders создана');
 
-
-    // После создания таблицы games добавить поле banner_url
     await pool.query(`
       ALTER TABLE games ADD COLUMN IF NOT EXISTS banner_url TEXT
     `);
@@ -684,42 +667,37 @@ async function initDB() {
     `);
     console.log('✅ Таблица wallets создана');
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS games (
+        id VARCHAR(50) PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        icon_url TEXT NOT NULL,
+        slug VARCHAR(50) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Таблица games создана');
 
-    // Таблица игр
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS games (
-    id VARCHAR(50) PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    icon_url TEXT NOT NULL,
-    slug VARCHAR(50) UNIQUE NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-console.log('✅ Таблица games создана');
+    await pool.query(`
+      INSERT INTO games (id, name, icon_url, slug) 
+      VALUES (
+        'brawlstars', 
+        'Brawl Stars', 
+        'https://i.imgur.com/3JxvXtR.png', 
+        'brawlstars'
+      ) ON CONFLICT (id) DO NOTHING
+    `);
+    console.log('✅ Игра Brawl Stars добавлена');
 
-// Добавляем Brawl Stars по умолчанию
-await pool.query(`
-  INSERT INTO games (id, name, icon_url, slug) 
-  VALUES (
-    'brawlstars', 
-    'Brawl Stars', 
-    'https://i.imgur.com/3JxvXtR.png', 
-    'brawlstars'
-  ) ON CONFLICT (id) DO NOTHING
-`);
-console.log('✅ Игра Brawl Stars добавлена');
+    await pool.query(`
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS game_id VARCHAR(50) 
+      DEFAULT 'brawlstars' REFERENCES games(id)
+    `);
+    console.log('✅ Колонка game_id добавлена в products');
 
-// Добавляем game_id в products
-await pool.query(`
-  ALTER TABLE products ADD COLUMN IF NOT EXISTS game_id VARCHAR(50) 
-  DEFAULT 'brawlstars' REFERENCES games(id)
-`);
-console.log('✅ Колонка game_id добавлена в products');
-
-// Обновляем существующие товары
-await pool.query(`
-  UPDATE products SET game_id = 'brawlstars' WHERE game_id IS NULL
-`);
+    await pool.query(`
+      UPDATE products SET game_id = 'brawlstars' WHERE game_id IS NULL
+    `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallet_transactions (
@@ -922,7 +900,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
             }
           } catch (photoError) {}
           
-          // Определяем новый провайдер
           const userResult = await pool.query(
             'SELECT auth_provider FROM users WHERE id = $1',
             [session.userId]
@@ -1193,7 +1170,6 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-
 // ===== КОМАНДА /setlogo - установить логотип игры =====
 adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
@@ -1203,8 +1179,7 @@ adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   if (!match[1] || !match[2]) {
     return adminBot.sendMessage(chatId, 
       '❌ Использование: /setlogo ID_ИГРЫ URL_ЛОГОТИПА\n\n' +
-      'Пример: /setlogo brawlstars https://i.imgur.com/logo.png\n\n' +
-      'Логотип должен быть квадратным или близким к квадрату (рекомендуется 200x200)'
+      'Пример: /setlogo brawlstars https://i.imgur.com/logo.png'
     );
   }
   
@@ -1212,9 +1187,8 @@ adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   const logoUrl = match[2];
   
   try {
-    // Проверяем, существует ли игра
     const gameCheck = await pool.query(
-      'SELECT id FROM games WHERE id = $1 OR slug = $1',
+      'SELECT id, name FROM games WHERE id = $1 OR slug = $1',
       [gameId]
     );
     
@@ -1222,30 +1196,22 @@ adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
       return adminBot.sendMessage(chatId, `❌ Игра с ID "${gameId}" не найдена`);
     }
     
-    // Обновляем логотип
+    const gameName = gameCheck.rows[0].name;
+    
     await pool.query(
       'UPDATE games SET icon_url = $1 WHERE id = $2 OR slug = $2',
       [logoUrl, gameId]
     );
     
-    // Получаем обновленную информацию об игре
-    const updatedGame = await pool.query(
-      'SELECT name FROM games WHERE id = $1 OR slug = $1',
-      [gameId]
-    );
-    
-    const gameName = updatedGame.rows[0]?.name || gameId;
-    
     await adminBot.sendMessage(chatId, 
-      `✅ Логотип для игры "${gameName}" успешно установлен!\n\n` +
-      `🆔 ID: ${gameCheck.rows[0].id}\n` +
-      `🖼️ Логотип: ${logoUrl}`
+      `✅ Логотип для игры *${gameName}* установлен!\n\n` +
+      `🖼️ URL: ${logoUrl}`,
+      { parse_mode: 'Markdown' }
     );
     
-    // Отправляем предпросмотр
     try {
       await adminBot.sendPhoto(chatId, logoUrl, {
-        caption: `🎮 Новый логотип для ${gameName}`,
+        caption: `🎮 Новый логотип для *${gameName}*`,
         parse_mode: 'Markdown'
       });
     } catch (previewError) {
@@ -1253,61 +1219,21 @@ adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
     }
     
   } catch (error) {
-    console.error('Ошибка установки логотипа:', error);
+    console.error('❌ Ошибка установки логотипа:', error);
     adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
   }
 });
 
-// ===== КОМАНДА /logos - список всех логотипов =====
-adminBot.onText(/\/logos/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  
-  try {
-    const result = await pool.query(
-      'SELECT id, name, icon_url FROM games WHERE icon_url IS NOT NULL ORDER BY name'
-    );
-    
-    if (result.rows.length === 0) {
-      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных логотипов');
-    }
-    
-    let text = '🎮 Установленные логотипы:\n\n';
-    
-    for (const game of result.rows) {
-      text += `• ${game.name} (${game.id})\n`;
-      text += `  ${game.icon_url}\n\n`;
-      
-      // Отправляем не больше 10 логотипов за раз, чтобы не спамить
-      if (text.length > 3000) {
-        await adminBot.sendMessage(msg.chat.id, text);
-        text = '';
-      }
-    }
-    
-    if (text) {
-      await adminBot.sendMessage(msg.chat.id, text);
-    }
-    
-    // Отправляем статистику
-    await adminBot.sendMessage(
-      msg.chat.id,
-      `📊 Всего логотипов: ${result.rows.length}`
-    );
-    
-  } catch (error) {
-    console.error('Ошибка получения логотипов:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении логотипов');
-  }
-});
-
-// ===== КОМАНДА /gameinfo - полная информация об игре =====
+// ===== КОМАНДА /gameinfo - информация об игре =====
 adminBot.onText(/\/gameinfo(?:\s+(\S+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
   const chatId = msg.chat.id;
   
   if (!match[1]) {
-    return adminBot.sendMessage(chatId, '❌ Укажите ID игры. Пример: /gameinfo brawlstars');
+    return adminBot.sendMessage(chatId, 
+      '❌ Укажите ID игры. Пример: /gameinfo brawlstars'
+    );
   }
   
   const gameId = match[1];
@@ -1329,53 +1255,54 @@ adminBot.onText(/\/gameinfo(?:\s+(\S+))?/, async (msg, match) => {
     infoText += `📛 **Название:** ${game.name}\n`;
     infoText += `🔗 **Slug:** \`${game.slug}\`\n\n`;
     infoText += `🖼️ **Логотип:**\n${game.icon_url || 'не установлен'}\n\n`;
-    infoText += `🏞️ **Баннер:**\n${game.banner_url || 'не установлен'}\n\n`;
     infoText += `📅 **Создана:** ${new Date(game.created_at).toLocaleString('ru-RU')}`;
     
-    // Создаем клавиатуру для быстрых действий
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '🖼️ Установить логотип', callback_data: `setlogo_prompt:${game.id}` },
-          { text: '🏞️ Установить баннер', callback_data: `setbanner_prompt:${game.id}` }
-        ],
-        [
-          { text: '📋 Список игр', callback_data: 'games_list' }
-        ]
-      ]
-    };
+    await adminBot.sendMessage(chatId, infoText, { parse_mode: 'Markdown' });
     
-    await adminBot.sendMessage(chatId, infoText, {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard
-    });
-    
-    // Отправляем предпросмотр, если есть оба изображения
-    if (game.icon_url || game.banner_url) {
-      const media = [];
-      if (game.icon_url) {
-        media.push({
-          type: 'photo',
-          media: game.icon_url,
-          caption: '🖼️ Логотип'
+    if (game.icon_url) {
+      try {
+        await adminBot.sendPhoto(chatId, game.icon_url, {
+          caption: `🖼️ Логотип *${game.name}*`,
+          parse_mode: 'Markdown'
         });
-      }
-      if (game.banner_url) {
-        media.push({
-          type: 'photo',
-          media: game.banner_url,
-          caption: '🏞️ Баннер'
-        });
-      }
-      
-      if (media.length > 0) {
-        await adminBot.sendMediaGroup(chatId, media);
+      } catch (photoError) {
+        console.error('Ошибка отправки логотипа:', photoError);
       }
     }
     
   } catch (error) {
-    console.error('Ошибка получения информации об игре:', error);
+    console.error('❌ Ошибка получения информации об игре:', error);
     adminBot.sendMessage(chatId, '❌ Ошибка при получении информации');
+  }
+});
+
+// ===== КОМАНДА /logos - список всех логотипов =====
+adminBot.onText(/\/logos/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, name, icon_url FROM games WHERE icon_url IS NOT NULL ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных логотипов');
+    }
+    
+    let text = '🎮 *Установленные логотипы*\n\n';
+    
+    result.rows.forEach((game, index) => {
+      text += `${index + 1}. *${game.name}* (\`${game.id}\`)\n`;
+      text += `   ${game.icon_url}\n\n`;
+    });
+    
+    text += `📊 *Всего:* ${result.rows.length}`;
+    
+    await adminBot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения логотипов:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении логотипов');
   }
 });
 
@@ -1658,7 +1585,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n🎮 Управление играми:\n/games - список всех игр\n/addgame - добавить новую игру\n/setlogo - установить логотип игры\n/setbanner - установить баннер игры\n/gameinfo - информация об игре\n/logos - список всех логотипов\n/banners - список всех баннеров\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -1694,7 +1621,6 @@ adminBot.onText(/\/setrate(?:\s+(\d+(?:\.\d+)?))?/, async (msg, match) => {
   }
 });
 
-
 // ===== КОМАНДА /addgame - добавить новую игру =====
 adminBot.onText(/\/addgame/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -1712,7 +1638,7 @@ adminBot.onText(/\/addgame/, async (msg) => {
   );
 });
 
-
+// ===== КОМАНДА /setbanner - установить баннер игры =====
 adminBot.onText(/\/setbanner(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
@@ -1738,6 +1664,7 @@ adminBot.onText(/\/setbanner(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   }
 });
 
+// ===== КОМАНДА /banners - список всех баннеров =====
 adminBot.onText(/\/banners/, async (msg) => {
   if (!isAdmin(msg)) return;
   
@@ -1748,7 +1675,7 @@ adminBot.onText(/\/banners/, async (msg) => {
       return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных баннеров');
     }
     
-    let text = '🖼️ Установленные баннеры:\n\n';
+    let text = '🏞️ Установленные баннеры:\n\n';
     result.rows.forEach(game => {
       text += `🎮 ${game.name} (${game.id})\n${game.banner_url}\n\n`;
     });
@@ -1777,7 +1704,8 @@ adminBot.onText(/\/games/, async (msg) => {
       text += `${index + 1}. ${game.name}\n`;
       text += `   ID: ${game.id}\n`;
       text += `   Slug: ${game.slug}\n`;
-      text += `   URL: ${game.icon_url}\n\n`;
+      text += `   Логотип: ${game.icon_url || 'не установлен'}\n`;
+      text += `   Баннер: ${game.banner_url || 'не установлен'}\n\n`;
     });
     
     adminBot.sendMessage(msg.chat.id, text);
@@ -2144,7 +2072,6 @@ adminBot.onText(/\/add_product/, async (msg) => {
   const chatId = msg.chat.id;
   
   try {
-    // Получаем список игр для выбора
     const games = await pool.query('SELECT id, name FROM games ORDER BY name');
     
     if (games.rows.length === 0) {
@@ -2374,501 +2301,6 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
-adminBot.on('message', async (msg) => {
-  if (!isAdmin(msg) || !msg.text) return;
-  
-  const chatId = msg.chat.id;
-  const text = msg.text.trim();
-  
-  if (text.startsWith('/')) return;
-  
-  const userState = userStates[chatId];
-
-  if (userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
-  const gameId = userState.gameId;
-  const logoUrl = text;
-  
-  if (!logoUrl.startsWith('http://') && !logoUrl.startsWith('https://')) {
-    await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
-    return;
-  }
-  
-  try {
-    const gameCheck = await pool.query(
-      'SELECT name FROM games WHERE id = $1',
-      [gameId]
-    );
-    
-    if (gameCheck.rows.length === 0) {
-      await adminBot.sendMessage(chatId, '❌ Игра не найдена');
-      delete userStates[chatId];
-      return;
-    }
-    
-    const gameName = gameCheck.rows[0].name;
-    
-    await pool.query(
-      'UPDATE games SET icon_url = $1 WHERE id = $2',
-      [logoUrl, gameId]
-    );
-    
-    await adminBot.sendMessage(
-      chatId,
-      `✅ Логотип для игры *${gameName}* установлен!`,
-      { parse_mode: 'Markdown' }
-    );
-    
-    try {
-      await adminBot.sendPhoto(chatId, logoUrl, {
-        caption: `🎮 Новый логотип для *${gameName}*`,
-        parse_mode: 'Markdown'
-      });
-    } catch (previewError) {
-      console.error('Ошибка отправки предпросмотра:', previewError);
-    }
-    
-    delete userStates[chatId];
-    
-  } catch (error) {
-    console.error('❌ Ошибка установки логотипа:', error);
-    await adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
-    delete userStates[chatId];
-  }
-  return;
-}
-  
-  if (!userState) return;
-  
-  console.log('📨 Получено сообщение от админа в состоянии:', userState);
-  
-  if (userState.action === 'support_reply') {
-    const dialogId = userState.dialog_id;
-    
-    try {
-      const dialogInfo = await pool.query(
-        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
-        [dialogId, 'active']
-      );
-      
-      if (dialogInfo.rows.length === 0) {
-        await adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
-        delete userStates[chatId];
-        return;
-      }
-      
-      const userId = dialogInfo.rows[0].user_id;
-      
-      const result = await pool.query(
-        `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [dialogId, userId, 'admin', text]
-      );
-      
-      await pool.query(
-        'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
-        [dialogId]
-      );
-      
-      const userResult = await pool.query(
-        'SELECT tg_id, username FROM users WHERE id = $1',
-        [userId]
-      );
-      
-      if (userResult.rows.length > 0 && userResult.rows[0].tg_id) {
-        try {
-          await userBot.sendMessage(
-            userResult.rows[0].tg_id,
-            `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${text}\n\n[Ответить можно на сайте](${SITE_URL}/support.html)`,
-            { parse_mode: 'Markdown' }
-          );
-        } catch (notifyError) {
-          console.error('Ошибка отправки уведомления пользователю:', notifyError);
-        }
-      }
-
-      await adminBot.sendMessage(
-        chatId, 
-        `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
-      );
-      
-      delete userStates[chatId];
-      
-    } catch (error) {
-      console.error('❌ Ошибка отправки ответа в поддержку:', error);
-      await adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа. Попробуйте еще раз.');
-      delete userStates[chatId];
-    }
-    return;
-  }
-
-  else if (userState.action === 'maintenance_duration') {
-    const minutes = parseInt(text);
-    
-    if (isNaN(minutes) || minutes < 1 || minutes > 1440) {
-      adminBot.sendMessage(chatId, '❌ Введите корректное число минут (от 1 до 1440)');
-      return;
-    }
-    
-    const duration = minutes;
-    const endTime = Date.now() + minutes * 60 * 1000;
-    
-    maintenanceMode = {
-      active: true,
-      endTime: endTime,
-      duration: duration,
-      startedAt: Date.now()
-    };
-    
-    const formattedDuration = formatMaintenanceTime(duration);
-    const endTimeStr = new Date(endTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: 'Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
-      ]
-    };
-    
-    await adminBot.sendMessage(
-      chatId,
-      `🔧 Технический перерыв запущен\n\n` +
-      `Длительность: ${formattedDuration}\n` +
-      `Окончание: ${endTimeStr}\n\n` +
-      `Все пользователи будут перенаправлены на страницу working.html`,
-      { 
-        reply_markup: keyboard 
-      }
-    );
-    
-    await adminBot.sendMessage(
-      ADMIN_ID,
-      `🔧 Технический перерыв активирован\n\nАдминистратор запустил техперерыв на ${formattedDuration}.`
-    );
-    
-    delete userStates[chatId];
-    return;
-  }
-
-
-  else if (userState.action === 'add_game') {
-  await handleAddGameStep(msg, userState);
-  return;
-}
-     
-  else if (userState.action === 'filter_user_id') {
-    const userId = parseInt(text);
-    
-    delete userStates[chatId];
-    
-    if (isNaN(userId) || userId <= 0) {
-      adminBot.sendMessage(chatId, '❌ Некорректный ID пользователя. Фильтр не применен.');
-      return;
-    }
-    
-    filterStates[chatId] = { userId: userId };
-    adminBot.sendMessage(chatId, `✅ Фильтр применен: заказы пользователя ID ${userId}`);
-    
-    await adminBot.emit('text', { ...msg, text: '/orders 1' });
-    return;
-  }
-  
-  else if (userState.action === 'edit_price') {
-    await handleEditPriceStep(msg, userState);
-    return;
-  }
-
-  else if (userState.action === 'addbalance') {
-    const amount = parseInt(text);
-    const userId = userState.userId;
-    
-    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
-      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
-      return;
-    }
-    
-    const userResult = await pool.query(
-      'SELECT id, tg_id, username FROM users WHERE id = $1',
-      [userId]
-    );
-    
-    if (userResult.rows.length === 0) {
-      adminBot.sendMessage(chatId, '❌ Пользователь не найден');
-      delete userStates[chatId];
-      return;
-    }
-    
-    const user = userResult.rows[0];
-    
-    const client = await pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-      
-      await client.query(
-        `INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) 
-         VALUES ($1, 0, 0, 0) 
-         ON CONFLICT (user_id) DO NOTHING`,
-        [user.id]
-      );
-      
-      const debtResult = await client.query(
-        `SELECT SUM(ABS(amount)) as total_debt 
-         FROM wallet_transactions 
-         WHERE user_id = $1 AND type = 'debt'`,
-        [user.id]
-      );
-      
-      const totalDebt = debtResult.rows[0]?.total_debt || 0;
-      
-      let remainingAmount = amount;
-      let debtPaid = 0;
-      
-      if (totalDebt > 0) {
-        const debtTransactions = await client.query(
-          `SELECT id, amount, order_id, metadata 
-           FROM wallet_transactions 
-           WHERE user_id = $1 AND type = 'debt'
-           ORDER BY created_at ASC`,
-          [user.id]
-        );
-        
-        for (const debt of debtTransactions.rows) {
-          if (remainingAmount <= 0) break;
-          
-          const debtAmount = Math.abs(debt.amount);
-          const payAmount = Math.min(debtAmount, remainingAmount);
-          
-          await client.query(
-            `UPDATE wallet_transactions 
-             SET amount = amount + $1, 
-                 metadata = jsonb_set(
-                   COALESCE(metadata, '{}'), 
-                   '{paid}', 
-                   to_jsonb(COALESCE((metadata->>'paid')::int, 0) + $2)
-                 )
-             WHERE id = $3`,
-            [payAmount, payAmount, debt.id]
-          );
-          
-          if (payAmount >= debtAmount) {
-            await client.query(
-              `UPDATE wallet_transactions 
-               SET type = 'debt_paid',
-                   metadata = metadata || '{"fully_paid": true}'
-               WHERE id = $1`,
-              [debt.id]
-            );
-          }
-          
-          debtPaid += payAmount;
-          remainingAmount -= payAmount;
-        }
-        
-        if (debtPaid > 0) {
-          await client.query(
-            `INSERT INTO wallet_transactions 
-             (user_id, type, amount, description, metadata) 
-             VALUES ($1, 'debt_payment', $2, $3, $4)`,
-            [user.id, -debtPaid, `Автоматическое погашение задолженности`, 
-             JSON.stringify({ auto_paid: true, amount: debtPaid })]
-          );
-        }
-      }
-
-      if (userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
-    const gameId = userState.gameId;
-    
-    if (!text.startsWith('http://') && !text.startsWith('https://')) {
-      await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
-      return;
-    }
-    
-    try {
-      await pool.query(
-        'UPDATE games SET icon_url = $1 WHERE id = $2',
-        [text, gameId]
-      );
-      
-      const gameResult = await pool.query(
-        'SELECT name FROM games WHERE id = $1',
-        [gameId]
-      );
-      
-      const gameName = gameResult.rows[0]?.name || gameId;
-      
-      await adminBot.sendMessage(
-        chatId,
-        `✅ Логотип для игры "${gameName}" установлен!\n\n` +
-        `🖼️ URL: ${text}`
-      );
-      
-      // Отправляем предпросмотр
-      try {
-        await adminBot.sendPhoto(chatId, text, {
-          caption: `🎮 Новый логотип для ${gameName}`,
-          parse_mode: 'Markdown'
-        });
-      } catch (previewError) {
-        console.error('Ошибка отправки предпросмотра:', previewError);
-      }
-      
-      delete userStates[chatId];
-      
-    } catch (error) {
-      console.error('Ошибка установки логотипа:', error);
-      await adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
-      delete userStates[chatId];
-    }
-    return;
-  }
-  
-  if (userState.action === 'setbanner' && userState.step === 'awaiting_banner_url') {
-    const gameId = userState.gameId;
-    
-    if (!text.startsWith('http://') && !text.startsWith('https://')) {
-      await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
-      return;
-    }
-    
-    try {
-      await pool.query(
-        'UPDATE games SET banner_url = $1 WHERE id = $2',
-        [text, gameId]
-      );
-      
-      const gameResult = await pool.query(
-        'SELECT name FROM games WHERE id = $1',
-        [gameId]
-      );
-      
-      const gameName = gameResult.rows[0]?.name || gameId;
-      
-      await adminBot.sendMessage(
-        chatId,
-        `✅ Баннер для игры "${gameName}" установлен!\n\n` +
-        `🏞️ URL: ${text}`
-      );
-      
-      // Отправляем предпросмотр
-      try {
-        await adminBot.sendPhoto(chatId, text, {
-          caption: `🏞️ Новый баннер для ${gameName}`,
-          parse_mode: 'Markdown'
-        });
-      } catch (previewError) {
-        console.error('Ошибка отправки предпросмотра:', previewError);
-      }
-      
-      delete userStates[chatId];
-      
-    } catch (error) {
-      console.error('Ошибка установки баннера:', error);
-      await adminBot.sendMessage(chatId, '❌ Ошибка при установке баннера');
-      delete userStates[chatId];
-    }
-    return;
-  }
-      
-      if (remainingAmount > 0) {
-        await client.query(
-          'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
-          [remainingAmount, user.id]
-        );
-        
-        await client.query(
-          `INSERT INTO wallet_transactions 
-           (user_id, type, amount, description, metadata) 
-           VALUES ($1, 'deposit', $2, $3, $4)`,
-          [user.id, remainingAmount, `Пополнение баланса администратором`, 
-           JSON.stringify({ admin: true, after_debt: true })]
-        );
-      }
-      
-      await client.query('COMMIT');
-      
-      let successText = `✅ Баланс пользователя пополнен!\n\n` +
-        `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
-        `🆔 ID: ${user.id}\n` +
-        `📱 TG ID: ${user.tg_id || 'не привязан'}\n` +
-        `💰 Сумма пополнения: ${formatRub(amount)}\n`;
-      
-      if (debtPaid > 0) {
-        successText += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
-      }
-      
-      if (remainingAmount > 0) {
-        successText += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n`;
-      } else {
-        successText += `⚠️ Вся сумма ушла на погашение задолженности\n`;
-      }
-      
-      adminBot.sendMessage(chatId, successText);
-      
-      if (user.tg_id) {
-        try {
-          let userMessage = `💰 Ваш баланс пополнен!\n\n`;
-          
-          if (debtPaid > 0) {
-            userMessage += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
-          }
-          
-          if (remainingAmount > 0) {
-            userMessage += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n\n`;
-          } else {
-            userMessage += `⚠️ Вся сумма ушла на погашение задолженности\n\n`;
-          }
-          
-          userMessage += `👉 Проверьте свой баланс в разделе "Кошелёк"`;
-          
-          await userBot.sendMessage(user.tg_id, userMessage);
-        } catch (notifyError) {
-          console.error('Ошибка уведомления пользователя:', notifyError);
-        }
-      }
-      
-    } catch (error) {
-      await client.query('ROLLBACK');
-      console.error('❌ Ошибка пополнения баланса:', error);
-      adminBot.sendMessage(chatId, '❌ Ошибка при пополнении баланса');
-    } finally {
-      client.release();
-    }
-    
-    delete userStates[chatId];
-    return;
-  }
-  
-  else if (userState.action === 'process_refund') {
-    await handleRefundStep(msg, userState);
-    return;
-  }
-
-  else if (userState.action === 'addbalance') {
-    const amount = parseInt(text);
-    const userId = userState.userId;
-    
-    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
-      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
-      return;
-    }
-    
-    const fakeMsg = { 
-      ...msg, 
-      text: `/addbalance ${userId} ${amount}`,
-      chat: { id: chatId },
-      from: { id: ADMIN_ID }
-    };
-    
-    delete userStates[chatId];
-    await adminBot.emit('text', fakeMsg);
-    return;
-  }
-  
-  else if (userState.step) {
-    await handleAddProductStep(msg, userState);
-    return;
-  }
-});
-
 adminBot.on('callback_query', async (cb) => {
   const data = cb.data;
   const chatId = cb.message.chat.id;
@@ -2880,42 +2312,35 @@ adminBot.on('callback_query', async (cb) => {
 
   console.log('Callback получен:', data);
 
+  // Обработка setlogo_prompt
+  if (data.startsWith('setlogo_prompt:')) {
+    const gameId = data.split(':')[1];
+    
+    userStates[chatId] = {
+      action: 'setlogo',
+      step: 'awaiting_logo_url',
+      gameId: gameId
+    };
+    
+    await adminBot.editMessageText(
+      `🖼️ *Установка логотипа*\n\nВведите URL логотипа:`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
   if (data.startsWith('dialogs_filter:')) {
     const filter = data.split(':')[1];
     await adminBot.deleteMessage(chatId, messageId);
     await adminBot.sendMessage(chatId, `/dialogs ${filter}`);
     return adminBot.answerCallbackQuery(cb.id);
   }
-
-  if (data.startsWith('setlogo_prompt:')) {
-  const gameId = data.split(':')[1];
-  
-  userStates[chatId] = {
-    action: 'setlogo',
-    step: 'awaiting_logo_url',
-    gameId: gameId
-  };
-  
-  await adminBot.editMessageText(
-    `🖼️ *Установка логотипа*\n\nВведите URL логотипа:`,
-    {
-      chat_id: chatId,
-      message_id: messageId,
-      parse_mode: 'Markdown'
-    }
-  );
-  
-  await adminBot.answerCallbackQuery(cb.id);
-  return;
-}
-
-if (data === 'games_list') {
-  const fakeMsg = { ...cb.message, text: '/games', chat: { id: chatId } };
-  await adminBot.emit('text', fakeMsg);
-  await adminBot.deleteMessage(chatId, messageId);
-  await adminBot.answerCallbackQuery(cb.id);
-  return;
-}
 
   if (data.startsWith('support_view:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -2944,7 +2369,6 @@ if (data === 'games_list') {
       let text = `💬 Диалог #${dialogId}\n\n`;
       text += `👤 Пользователь ID: \`${dialog.user_id}\`\n`;
       
-      // Определяем отображаемое имя (приоритет: VK > обычное имя)
       let displayName = dialog.username || '';
       if (dialog.vk_first_name || dialog.vk_last_name) {
         displayName = `${dialog.vk_first_name || ''} ${dialog.vk_last_name || ''}`.trim();
@@ -2953,7 +2377,6 @@ if (data === 'games_list') {
         text += `   Имя: ${displayName}\n`;
       }
       
-      // Показываем email (приоритет: VK email > обычный email)
       const displayEmail = dialog.vk_email || dialog.email;
       if (displayEmail) {
         text += `   Email: ${displayEmail}\n`;
@@ -2996,85 +2419,25 @@ if (data === 'games_list') {
     return;
   }
 
-
   if (data.startsWith('select_game:')) {
-  const gameId = data.split(':')[1];
-  
-  userStates[chatId] = {
-    step: 'awaiting_name',
-    productData: { game_id: gameId }
-  };
-  
-  await adminBot.editMessageText(
-    '📝 Добавление товара\n\nШаг 1/4: Введите название товара:',
-    {
-      chat_id: chatId,
-      message_id: messageId
-    }
-  );
-  
-  await adminBot.answerCallbackQuery(cb.id);
-  return;
-}
-
-
-  if (data.startsWith('setlogo_prompt:')) {
     const gameId = data.split(':')[1];
     
     userStates[chatId] = {
-      action: 'setlogo',
-      step: 'awaiting_logo_url',
-      gameId: gameId
+      step: 'awaiting_name',
+      productData: { game_id: gameId }
     };
     
     await adminBot.editMessageText(
-      `🖼️ *Установка логотипа для игры*\n\n` +
-      `Введите URL логотипа (изображение должно быть квадратным, рекомендуется 200x200):\n\n` +
-      `Пример: \`https://i.imgur.com/logo.png\``,
+      '📝 Добавление товара\n\nШаг 1/4: Введите название товара:',
       {
         chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown'
+        message_id: messageId
       }
     );
     
     await adminBot.answerCallbackQuery(cb.id);
     return;
   }
-
-  if (data.startsWith('setbanner_prompt:')) {
-    const gameId = data.split(':')[1];
-    
-    userStates[chatId] = {
-      action: 'setbanner',
-      step: 'awaiting_banner_url',
-      gameId: gameId
-    };
-    
-    await adminBot.editMessageText(
-      `🏞️ *Установка баннера для игры*\n\n` +
-      `Введите URL баннера (рекомендуемые размеры 1920x500):\n\n` +
-      `Пример: \`https://i.imgur.com/banner.jpg\``,
-      {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown'
-      }
-    );
-    
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-
-  if (data === 'games_list') {
-    // Возвращаем список игр
-    const fakeMsg = { ...cb.message, text: '/games', chat: { id: chatId } };
-    await adminBot.emit('text', fakeMsg);
-    await adminBot.deleteMessage(chatId, messageId);
-    await adminBot.answerCallbackQuery(cb.id);
-    return;
-  }
-});
 
   if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -3228,14 +2591,12 @@ if (data === 'games_list') {
       let infoText = `👤 **Информация о пользователе**\n\n`;
       infoText += `**ID в магазине:** ${user.id}\n`;
       
-      // Определяем отображаемое имя
       let displayName = user.username || 'Не указано';
       if (user.vk_first_name || user.vk_last_name) {
         displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
       }
       infoText += `**Имя:** ${displayName}\n`;
       
-      // Показываем email (приоритет VK)
       if (user.vk_email) {
         infoText += `**VK Email:** ${user.vk_email}\n`;
       } else if (user.email) {
@@ -3392,14 +2753,12 @@ if (data === 'games_list') {
       let infoText = `👤 **Информация о пользователе**\n\n`;
       infoText += `**ID в магазине:** \`${user.id}\`\n`;
       
-      // Определяем отображаемое имя (приоритет VK)
       let displayName = user.username || 'Не указано';
       if (user.vk_first_name || user.vk_last_name) {
         displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
       }
       infoText += `**Имя:** ${displayName}\n`;
       
-      // Показываем email (приоритет VK)
       const displayEmail = user.vk_email || user.email;
       if (displayEmail) {
         infoText += `**Email:** ${displayEmail}\n`;
@@ -4876,86 +4235,485 @@ if (data === 'games_list') {
   }
 
   if (data.startsWith('set_gift:')) {
-  const isGift = data.split(':')[1];
-  const userState = userStates[chatId];
-  
-  if (!userState || userState.step !== 'awaiting_gift') {
-    await adminBot.answerCallbackQuery(cb.id, { 
-      text: '❌ Сессия устарела. Начните заново командой /add_product',
-      show_alert: true 
-    });
+    const isGift = data.split(':')[1];
+    const userState = userStates[chatId];
+    
+    if (!userState || userState.step !== 'awaiting_gift') {
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Сессия устарела. Начните заново командой /add_product',
+        show_alert: true 
+      });
+      return;
+    }
+    
+    try {
+      const is_gift = isGift === '1';
+      userState.productData.is_gift = is_gift;
+      
+      const timestamp = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const id = `prod_${timestamp}_${randomString}`;
+      
+      const { name, price, image_url, game_id } = userState.productData;
+      
+      await pool.query(
+        'INSERT INTO products (id, name, price, image_url, is_gift, game_id) VALUES ($1, $2, $3, $4, $5, $6)',
+        [id, name, price, image_url, is_gift, game_id]
+      );
+      
+      const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
+      const gameName = gameResult.rows[0]?.name || 'Неизвестно';
+      
+      const successText = `🎉 Товар успешно добавлен!\n\n` +
+        `📝 Информация о товаре:\n` +
+        `🆔 ID: \`${id}\`\n` +
+        `🎮 Игра: ${gameName}\n` +
+        `🏷️ Название: ${name}\n` +
+        `💰 Цена: ${formatRub(price)}\n` +
+        `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+        `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
+      
+      delete userStates[chatId];
+      
+      await adminBot.editMessageText(successText, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Товар добавлен!',
+        show_alert: false
+      });
+      
+      await adminBot.sendMessage(
+        chatId,
+        `✅ Товар *${name}* для игры *${gameName}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
+        { parse_mode: 'Markdown' }
+      );
+      
+    } catch (error) {
+      console.error('❌ Ошибка сохранения товара:', error);
+      delete userStates[chatId];
+      
+      await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка сохранения',
+        show_alert: true
+      });
+    }
     return;
   }
-  
-  try {
-    const is_gift = isGift === '1';
-    userState.productData.is_gift = is_gift;
-    
-    const timestamp = Date.now();
-    const randomString = Math.random().toString(36).substring(2, 8);
-    const id = `prod_${timestamp}_${randomString}`;
-    
-    const { name, price, image_url, game_id } = userState.productData;
-    
-    // ВСТАВЛЯЕМ СЮДА НОВЫЙ INSERT С game_id
-    await pool.query(
-      'INSERT INTO products (id, name, price, image_url, is_gift, game_id) VALUES ($1, $2, $3, $4, $5, $6)',
-      [id, name, price, image_url, is_gift, game_id]
-    );
-    
-    // Получаем название игры для красивого вывода
-    const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
-    const gameName = gameResult.rows[0]?.name || 'Неизвестно';
-    
-    const successText = `🎉 Товар успешно добавлен!\n\n` +
-      `📝 Информация о товаре:\n` +
-      `🆔 ID: \`${id}\`\n` +
-      `🎮 Игра: ${gameName}\n` +
-      `🏷️ Название: ${name}\n` +
-      `💰 Цена: ${formatRub(price)}\n` +
-      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
-      `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
-    
-    delete userStates[chatId];
-    
-    await adminBot.editMessageText(successText, {
-      chat_id: chatId,
-      message_id: messageId,
-      parse_mode: 'Markdown'
-    });
-    
-    await adminBot.answerCallbackQuery(cb.id, { 
-      text: '✅ Товар добавлен!',
-      show_alert: false
-    });
-    
-    await adminBot.sendMessage(
-      chatId,
-      `✅ Товар *${name}* для игры *${gameName}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
-      { parse_mode: 'Markdown' }
-    );
-    
-  } catch (error) {
-    console.error('❌ Ошибка сохранения товара:', error);
-    delete userStates[chatId];
-    
-    await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
-      chat_id: chatId,
-      message_id: messageId
-    });
-    
-    await adminBot.answerCallbackQuery(cb.id, { 
-      text: '❌ Ошибка сохранения',
-      show_alert: true
-    });
-  }
-  return;
-}
 
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
     show_alert: true
   });
+});
+
+adminBot.on('message', async (msg) => {
+  if (!isAdmin(msg) || !msg.text) return;
+  
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  if (text.startsWith('/')) return;
+  
+  const userState = userStates[chatId];
+  
+  // Обработка установки логотипа
+  if (userState && userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
+    const gameId = userState.gameId;
+    const logoUrl = text;
+    
+    if (!logoUrl.startsWith('http://') && !logoUrl.startsWith('https://')) {
+      await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+      return;
+    }
+    
+    try {
+      const gameCheck = await pool.query(
+        'SELECT name FROM games WHERE id = $1',
+        [gameId]
+      );
+      
+      if (gameCheck.rows.length === 0) {
+        await adminBot.sendMessage(chatId, '❌ Игра не найдена');
+        delete userStates[chatId];
+        return;
+      }
+      
+      const gameName = gameCheck.rows[0].name;
+      
+      await pool.query(
+        'UPDATE games SET icon_url = $1 WHERE id = $2',
+        [logoUrl, gameId]
+      );
+      
+      await adminBot.sendMessage(
+        chatId,
+        `✅ Логотип для игры *${gameName}* установлен!`,
+        { parse_mode: 'Markdown' }
+      );
+      
+      try {
+        await adminBot.sendPhoto(chatId, logoUrl, {
+          caption: `🎮 Новый логотип для *${gameName}*`,
+          parse_mode: 'Markdown'
+        });
+      } catch (previewError) {
+        console.error('Ошибка отправки предпросмотра:', previewError);
+      }
+      
+      delete userStates[chatId];
+      
+    } catch (error) {
+      console.error('❌ Ошибка установки логотипа:', error);
+      await adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
+      delete userStates[chatId];
+    }
+    return;
+  }
+
+  if (!userState) return;
+  
+  console.log('📨 Получено сообщение от админа в состоянии:', userState);
+  
+  if (userState.action === 'support_reply') {
+    const dialogId = userState.dialog_id;
+    
+    try {
+      const dialogInfo = await pool.query(
+        'SELECT user_id FROM support_dialogs WHERE id = $1 AND status = $2',
+        [dialogId, 'active']
+      );
+      
+      if (dialogInfo.rows.length === 0) {
+        await adminBot.sendMessage(chatId, '❌ Диалог не найден или уже закрыт');
+        delete userStates[chatId];
+        return;
+      }
+      
+      const userId = dialogInfo.rows[0].user_id;
+      
+      const result = await pool.query(
+        `INSERT INTO support_messages (dialog_id, user_id, sender, message) 
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [dialogId, userId, 'admin', text]
+      );
+      
+      await pool.query(
+        'UPDATE support_dialogs SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [dialogId]
+      );
+      
+      const userResult = await pool.query(
+        'SELECT tg_id, username FROM users WHERE id = $1',
+        [userId]
+      );
+      
+      if (userResult.rows.length > 0 && userResult.rows[0].tg_id) {
+        try {
+          await userBot.sendMessage(
+            userResult.rows[0].tg_id,
+            `✉️ Новый ответ от поддержки в диалоге #${dialogId}:\n\n${text}\n\n[Ответить можно на сайте](${SITE_URL}/support.html)`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch (notifyError) {
+          console.error('Ошибка отправки уведомления пользователю:', notifyError);
+        }
+      }
+
+      await adminBot.sendMessage(
+        chatId, 
+        `✅ Ответ отправлен в диалог #${dialogId}\n\nВаше сообщение: ${text}`
+      );
+      
+      delete userStates[chatId];
+      
+    } catch (error) {
+      console.error('❌ Ошибка отправки ответа в поддержку:', error);
+      await adminBot.sendMessage(chatId, '❌ Ошибка при отправке ответа. Попробуйте еще раз.');
+      delete userStates[chatId];
+    }
+    return;
+  }
+
+  else if (userState.action === 'maintenance_duration') {
+    const minutes = parseInt(text);
+    
+    if (isNaN(minutes) || minutes < 1 || minutes > 1440) {
+      adminBot.sendMessage(chatId, '❌ Введите корректное число минут (от 1 до 1440)');
+      return;
+    }
+    
+    const duration = minutes;
+    const endTime = Date.now() + minutes * 60 * 1000;
+    
+    maintenanceMode = {
+      active: true,
+      endTime: endTime,
+      duration: duration,
+      startedAt: Date.now()
+    };
+    
+    const formattedDuration = formatMaintenanceTime(duration);
+    const endTimeStr = new Date(endTime).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: 'Завершить техперерыв', callback_data: 'maintenance_end_confirm' }]
+      ]
+    };
+    
+    await adminBot.sendMessage(
+      chatId,
+      `🔧 Технический перерыв запущен\n\n` +
+      `Длительность: ${formattedDuration}\n` +
+      `Окончание: ${endTimeStr}\n\n` +
+      `Все пользователи будут перенаправлены на страницу working.html`,
+      { 
+        reply_markup: keyboard 
+      }
+    );
+    
+    await adminBot.sendMessage(
+      ADMIN_ID,
+      `🔧 Технический перерыв активирован\n\nАдминистратор запустил техперерыв на ${formattedDuration}.`
+    );
+    
+    delete userStates[chatId];
+    return;
+  }
+
+  else if (userState.action === 'add_game') {
+    await handleAddGameStep(msg, userState);
+    return;
+  }
+     
+  else if (userState.action === 'filter_user_id') {
+    const userId = parseInt(text);
+    
+    delete userStates[chatId];
+    
+    if (isNaN(userId) || userId <= 0) {
+      adminBot.sendMessage(chatId, '❌ Некорректный ID пользователя. Фильтр не применен.');
+      return;
+    }
+    
+    filterStates[chatId] = { userId: userId };
+    adminBot.sendMessage(chatId, `✅ Фильтр применен: заказы пользователя ID ${userId}`);
+    
+    await adminBot.emit('text', { ...msg, text: '/orders 1' });
+    return;
+  }
+  
+  else if (userState.action === 'edit_price') {
+    await handleEditPriceStep(msg, userState);
+    return;
+  }
+
+  else if (userState.action === 'addbalance') {
+    const amount = parseInt(text);
+    const userId = userState.userId;
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
+      return;
+    }
+    
+    const userResult = await pool.query(
+      'SELECT id, tg_id, username FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      adminBot.sendMessage(chatId, '❌ Пользователь не найден');
+      delete userStates[chatId];
+      return;
+    }
+    
+    const user = userResult.rows[0];
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      await client.query(
+        `INSERT INTO wallets (user_id, balance, frozen_balance, available_balance) 
+         VALUES ($1, 0, 0, 0) 
+         ON CONFLICT (user_id) DO NOTHING`,
+        [user.id]
+      );
+      
+      const debtResult = await client.query(
+        `SELECT SUM(ABS(amount)) as total_debt 
+         FROM wallet_transactions 
+         WHERE user_id = $1 AND type = 'debt'`,
+        [user.id]
+      );
+      
+      const totalDebt = debtResult.rows[0]?.total_debt || 0;
+      
+      let remainingAmount = amount;
+      let debtPaid = 0;
+      
+      if (totalDebt > 0) {
+        const debtTransactions = await client.query(
+          `SELECT id, amount, order_id, metadata 
+           FROM wallet_transactions 
+           WHERE user_id = $1 AND type = 'debt'
+           ORDER BY created_at ASC`,
+          [user.id]
+        );
+        
+        for (const debt of debtTransactions.rows) {
+          if (remainingAmount <= 0) break;
+          
+          const debtAmount = Math.abs(debt.amount);
+          const payAmount = Math.min(debtAmount, remainingAmount);
+          
+          await client.query(
+            `UPDATE wallet_transactions 
+             SET amount = amount + $1, 
+                 metadata = jsonb_set(
+                   COALESCE(metadata, '{}'), 
+                   '{paid}', 
+                   to_jsonb(COALESCE((metadata->>'paid')::int, 0) + $2)
+                 )
+             WHERE id = $3`,
+            [payAmount, payAmount, debt.id]
+          );
+          
+          if (payAmount >= debtAmount) {
+            await client.query(
+              `UPDATE wallet_transactions 
+               SET type = 'debt_paid',
+                   metadata = metadata || '{"fully_paid": true}'
+               WHERE id = $1`,
+              [debt.id]
+            );
+          }
+          
+          debtPaid += payAmount;
+          remainingAmount -= payAmount;
+        }
+        
+        if (debtPaid > 0) {
+          await client.query(
+            `INSERT INTO wallet_transactions 
+             (user_id, type, amount, description, metadata) 
+             VALUES ($1, 'debt_payment', $2, $3, $4)`,
+            [user.id, -debtPaid, `Автоматическое погашение задолженности`, 
+             JSON.stringify({ auto_paid: true, amount: debtPaid })]
+          );
+        }
+      }
+      
+      if (remainingAmount > 0) {
+        await client.query(
+          'UPDATE wallets SET available_balance = available_balance + $1 WHERE user_id = $2',
+          [remainingAmount, user.id]
+        );
+        
+        await client.query(
+          `INSERT INTO wallet_transactions 
+           (user_id, type, amount, description, metadata) 
+           VALUES ($1, 'deposit', $2, $3, $4)`,
+          [user.id, remainingAmount, `Пополнение баланса администратором`, 
+           JSON.stringify({ admin: true, after_debt: true })]
+        );
+      }
+      
+      await client.query('COMMIT');
+      
+      let successText = `✅ Баланс пользователя пополнен!\n\n` +
+        `👤 Пользователь: ${user.username || 'ID ' + user.id}\n` +
+        `🆔 ID: ${user.id}\n` +
+        `📱 TG ID: ${user.tg_id || 'не привязан'}\n` +
+        `💰 Сумма пополнения: ${formatRub(amount)}\n`;
+      
+      if (debtPaid > 0) {
+        successText += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+      }
+      
+      if (remainingAmount > 0) {
+        successText += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n`;
+      } else {
+        successText += `⚠️ Вся сумма ушла на погашение задолженности\n`;
+      }
+      
+      adminBot.sendMessage(chatId, successText);
+      
+      if (user.tg_id) {
+        try {
+          let userMessage = `💰 Ваш баланс пополнен!\n\n`;
+          
+          if (debtPaid > 0) {
+            userMessage += `💸 Погашено задолженности: ${formatRub(debtPaid)} DCoin\n`;
+          }
+          
+          if (remainingAmount > 0) {
+            userMessage += `💎 Зачислено на баланс: ${formatRub(remainingAmount)} DCoin\n\n`;
+          } else {
+            userMessage += `⚠️ Вся сумма ушла на погашение задолженности\n\n`;
+          }
+          
+          userMessage += `👉 Проверьте свой баланс в разделе "Кошелёк"`;
+          
+          await userBot.sendMessage(user.tg_id, userMessage);
+        } catch (notifyError) {
+          console.error('Ошибка уведомления пользователя:', notifyError);
+        }
+      }
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('❌ Ошибка пополнения баланса:', error);
+      adminBot.sendMessage(chatId, '❌ Ошибка при пополнении баланса');
+    } finally {
+      client.release();
+    }
+    
+    delete userStates[chatId];
+    return;
+  }
+  
+  else if (userState.action === 'process_refund') {
+    await handleRefundStep(msg, userState);
+    return;
+  }
+
+  else if (userState.action === 'addbalance') {
+    const amount = parseInt(text);
+    const userId = userState.userId;
+    
+    if (isNaN(amount) || amount <= 0 || amount > 1000000) {
+      adminBot.sendMessage(chatId, '❌ Сумма должна быть от 1 до 1 000 000 рублей');
+      return;
+    }
+    
+    const fakeMsg = { 
+      ...msg, 
+      text: `/addbalance ${userId} ${amount}`,
+      chat: { id: chatId },
+      from: { id: ADMIN_ID }
+    };
+    
+    delete userStates[chatId];
+    await adminBot.emit('text', fakeMsg);
+    return;
+  }
+  
+  else if (userState.step) {
+    await handleAddProductStep(msg, userState);
+    return;
+  }
 });
 
 async function handleDateFilter(msg, filterType, callbackQueryId) {
@@ -5016,12 +4774,12 @@ async function handleAddGameStep(msg, userState) {
           return;
         }
   
-        userState.productData = { 
-          ...userState.productData,  // сохраняем game_id и другие поля
+        userState.gameData = { 
+          ...userState.gameData,
           name: text 
         };
-        userState.step = 'awaiting_price';
-        adminBot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/4: Введите цену товара (в рублях, только цифры):');
+        userState.step = 'awaiting_icon';
+        adminBot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/3: Введите URL иконки игры:');
         break;
         
       case 'awaiting_icon':
@@ -5047,7 +4805,6 @@ async function handleAddGameStep(msg, userState) {
         const gameId = slug;
         const { name, icon_url } = userState.gameData;
         
-        // Проверяем, нет ли уже такой игры
         const existing = await pool.query(
           'SELECT id FROM games WHERE slug = $1 OR id = $2',
           [slug, gameId]
@@ -5074,7 +4831,6 @@ async function handleAddGameStep(msg, userState) {
         delete userStates[chatId];
         adminBot.sendMessage(chatId, successText);
         
-        // Уведомление в общий чат
         await adminBot.sendMessage(
           ADMIN_ID,
           `🎮 Новая игра добавлена!\n\n${name} (${slug})`
@@ -5130,14 +4886,12 @@ async function showSupportDialog(msg, dialogId, callbackQueryId) {
     docContent += `ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:\n`;
     docContent += `• ID в магазине: ${dialog.user_id}\n`;
     
-    // Отображаем имя (приоритет VK)
     let displayName = dialog.username || 'Не указано';
     if (dialog.vk_first_name || dialog.vk_last_name) {
       displayName = `${dialog.vk_first_name || ''} ${dialog.vk_last_name || ''}`.trim();
     }
     docContent += `• Имя: ${displayName}\n`;
     
-    // Отображаем email (приоритет VK)
     const displayEmail = dialog.vk_email || dialog.email;
     if (displayEmail) {
       docContent += `• Email: ${displayEmail}\n`;
@@ -5229,14 +4983,12 @@ async function showUserInfo(msg, userId, callbackQueryId) {
     let infoText = `👤 **Информация о пользователе**\n\n`;
     infoText += `**ID в магазине:** ${user.id}\n`;
     
-    // Отображаем имя (приоритет VK)
     let displayName = user.username || 'Не указано';
     if (user.vk_first_name || user.vk_last_name) {
       displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
     }
     infoText += `**Имя:** ${displayName}\n`;
     
-    // Отображаем email (приоритет VK)
     const displayEmail = user.vk_email || user.email;
     if (displayEmail) {
       infoText += `**Email:** ${displayEmail}\n`;
@@ -5302,7 +5054,6 @@ adminBot.onText(/\/dialogs(?:\s+(all|active|closed))?/, async (msg, match) => {
         const date = new Date(row.updated_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
         const statusEmoji = row.status === 'active' ? '🟢' : '🔴';
         
-        // Определяем отображаемое имя (приоритет VK)
         let name = row.username || '';
         if (row.vk_first_name || row.vk_last_name) {
           name = `${row.vk_first_name || ''} ${row.vk_last_name || ''}`.trim();
@@ -5380,7 +5131,6 @@ adminBot.onText(/\/users(?:\s+(\d+))?/, async (msg, match) => {
       
       const createdDate = new Date(user.created_at).toLocaleDateString('ru-RU');
       
-      // Определяем отображаемое имя (приоритет VK)
       let displayName = user.username || 'Без имени';
       if (user.vk_first_name || user.vk_last_name) {
         displayName = `${user.vk_first_name || ''} ${user.vk_last_name || ''}`.trim();
@@ -5507,10 +5257,8 @@ async function handleAddProductStep(msg, userState) {
         userState.productData.image_url = text;
         userState.step = 'awaiting_gift';
         
-        // Получаем game_id из сохраненных данных
         const gameId = userState.productData.game_id;
         
-        // Получаем название игры для отображения
         const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [gameId]);
         const gameName = gameResult.rows[0]?.name || 'неизвестно';
         
@@ -7067,7 +6815,6 @@ app.post('/api/user/link-telegram', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Telegram already linked to another account' });
     }
     
-    // Определяем новый провайдер
     const userResult = await pool.query(
       'SELECT auth_provider FROM users WHERE id = $1',
       [userId]
@@ -7545,7 +7292,6 @@ app.get('/api/games/:slug', async (req, res) => {
   }
 });
 
-// Добавляем эндпоинт для обновления логотипа (для админ-панели)
 app.post('/api/admin/games/logo', async (req, res) => {
   try {
     const { gameId, logoUrl } = req.body;
@@ -7574,7 +7320,6 @@ app.post('/api/admin/games/logo', async (req, res) => {
   }
 });
 
-// Добавляем эндпоинт для обновления баннера (для админ-панели)
 app.post('/api/admin/games/banner', async (req, res) => {
   try {
     const { gameId, bannerUrl } = req.body;
@@ -8002,7 +7747,6 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
       isActive: !['completed', 'canceled', 'manyback'].includes(order.status)
     }));
 
-    // Определяем отображаемые данные (приоритет VK)
     const displayFirstName = user.vk_first_name || user.first_name;
     const displayLastName = user.vk_last_name || user.last_name;
     const displayEmail = user.vk_email || user.email;
@@ -8265,7 +8009,7 @@ app.get('/api/order-status/:orderId', async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const { game } = req.query; // получаем параметр game из URL
+    const { game } = req.query;
     
     let query = 'SELECT * FROM products';
     let params = [];
@@ -8298,7 +8042,6 @@ app.get('/api/games', async (req, res) => {
   }
 });
 
-// ===== GET /api/games/:slug - информация об игре =====
 app.get('/api/games/:slug', async (req, res) => {
   try {
     const { slug } = req.params;
@@ -8321,12 +8064,10 @@ app.get('/api/games/:slug', async (req, res) => {
   }
 });
 
-// ===== POST /api/admin/add-game (для админ-бота) =====
 app.post('/api/admin/add-game', async (req, res) => {
   try {
     const { id, name, icon_url, slug } = req.body;
     
-    // Генерируем ID если не передан
     const gameId = id || slug.toLowerCase().replace(/[^a-z0-9]/g, '');
     
     await pool.query(
