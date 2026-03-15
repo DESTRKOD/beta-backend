@@ -2383,6 +2383,59 @@ adminBot.on('message', async (msg) => {
   if (text.startsWith('/')) return;
   
   const userState = userStates[chatId];
+
+  if (userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
+  const gameId = userState.gameId;
+  const logoUrl = text;
+  
+  if (!logoUrl.startsWith('http://') && !logoUrl.startsWith('https://')) {
+    await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+    return;
+  }
+  
+  try {
+    const gameCheck = await pool.query(
+      'SELECT name FROM games WHERE id = $1',
+      [gameId]
+    );
+    
+    if (gameCheck.rows.length === 0) {
+      await adminBot.sendMessage(chatId, '❌ Игра не найдена');
+      delete userStates[chatId];
+      return;
+    }
+    
+    const gameName = gameCheck.rows[0].name;
+    
+    await pool.query(
+      'UPDATE games SET icon_url = $1 WHERE id = $2',
+      [logoUrl, gameId]
+    );
+    
+    await adminBot.sendMessage(
+      chatId,
+      `✅ Логотип для игры *${gameName}* установлен!`,
+      { parse_mode: 'Markdown' }
+    );
+    
+    try {
+      await adminBot.sendPhoto(chatId, logoUrl, {
+        caption: `🎮 Новый логотип для *${gameName}*`,
+        parse_mode: 'Markdown'
+      });
+    } catch (previewError) {
+      console.error('Ошибка отправки предпросмотра:', previewError);
+    }
+    
+    delete userStates[chatId];
+    
+  } catch (error) {
+    console.error('❌ Ошибка установки логотипа:', error);
+    await adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
+    delete userStates[chatId];
+  }
+  return;
+}
   
   if (!userState) return;
   
@@ -2833,6 +2886,36 @@ adminBot.on('callback_query', async (cb) => {
     await adminBot.sendMessage(chatId, `/dialogs ${filter}`);
     return adminBot.answerCallbackQuery(cb.id);
   }
+
+  if (data.startsWith('setlogo_prompt:')) {
+  const gameId = data.split(':')[1];
+  
+  userStates[chatId] = {
+    action: 'setlogo',
+    step: 'awaiting_logo_url',
+    gameId: gameId
+  };
+  
+  await adminBot.editMessageText(
+    `🖼️ *Установка логотипа*\n\nВведите URL логотипа:`,
+    {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    }
+  );
+  
+  await adminBot.answerCallbackQuery(cb.id);
+  return;
+}
+
+if (data === 'games_list') {
+  const fakeMsg = { ...cb.message, text: '/games', chat: { id: chatId } };
+  await adminBot.emit('text', fakeMsg);
+  await adminBot.deleteMessage(chatId, messageId);
+  await adminBot.answerCallbackQuery(cb.id);
+  return;
+}
 
   if (data.startsWith('support_view:')) {
     const dialogId = parseInt(data.split(':')[1]);
