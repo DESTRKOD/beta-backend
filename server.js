@@ -1193,6 +1193,192 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
+
+// ===== КОМАНДА /setlogo - установить логотип игры =====
+adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  if (!match[1] || !match[2]) {
+    return adminBot.sendMessage(chatId, 
+      '❌ Использование: /setlogo ID_ИГРЫ URL_ЛОГОТИПА\n\n' +
+      'Пример: /setlogo brawlstars https://i.imgur.com/logo.png\n\n' +
+      'Логотип должен быть квадратным или близким к квадрату (рекомендуется 200x200)'
+    );
+  }
+  
+  const gameId = match[1];
+  const logoUrl = match[2];
+  
+  try {
+    // Проверяем, существует ли игра
+    const gameCheck = await pool.query(
+      'SELECT id FROM games WHERE id = $1 OR slug = $1',
+      [gameId]
+    );
+    
+    if (gameCheck.rows.length === 0) {
+      return adminBot.sendMessage(chatId, `❌ Игра с ID "${gameId}" не найдена`);
+    }
+    
+    // Обновляем логотип
+    await pool.query(
+      'UPDATE games SET icon_url = $1 WHERE id = $2 OR slug = $2',
+      [logoUrl, gameId]
+    );
+    
+    // Получаем обновленную информацию об игре
+    const updatedGame = await pool.query(
+      'SELECT name FROM games WHERE id = $1 OR slug = $1',
+      [gameId]
+    );
+    
+    const gameName = updatedGame.rows[0]?.name || gameId;
+    
+    await adminBot.sendMessage(chatId, 
+      `✅ Логотип для игры "${gameName}" успешно установлен!\n\n` +
+      `🆔 ID: ${gameCheck.rows[0].id}\n` +
+      `🖼️ Логотип: ${logoUrl}`
+    );
+    
+    // Отправляем предпросмотр
+    try {
+      await adminBot.sendPhoto(chatId, logoUrl, {
+        caption: `🎮 Новый логотип для ${gameName}`,
+        parse_mode: 'Markdown'
+      });
+    } catch (previewError) {
+      console.error('Ошибка отправки предпросмотра:', previewError);
+    }
+    
+  } catch (error) {
+    console.error('Ошибка установки логотипа:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
+  }
+});
+
+// ===== КОМАНДА /logos - список всех логотипов =====
+adminBot.onText(/\/logos/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, name, icon_url FROM games WHERE icon_url IS NOT NULL ORDER BY name'
+    );
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных логотипов');
+    }
+    
+    let text = '🎮 Установленные логотипы:\n\n';
+    
+    for (const game of result.rows) {
+      text += `• ${game.name} (${game.id})\n`;
+      text += `  ${game.icon_url}\n\n`;
+      
+      // Отправляем не больше 10 логотипов за раз, чтобы не спамить
+      if (text.length > 3000) {
+        await adminBot.sendMessage(msg.chat.id, text);
+        text = '';
+      }
+    }
+    
+    if (text) {
+      await adminBot.sendMessage(msg.chat.id, text);
+    }
+    
+    // Отправляем статистику
+    await adminBot.sendMessage(
+      msg.chat.id,
+      `📊 Всего логотипов: ${result.rows.length}`
+    );
+    
+  } catch (error) {
+    console.error('Ошибка получения логотипов:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении логотипов');
+  }
+});
+
+// ===== КОМАНДА /gameinfo - полная информация об игре =====
+adminBot.onText(/\/gameinfo(?:\s+(\S+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  if (!match[1]) {
+    return adminBot.sendMessage(chatId, '❌ Укажите ID игры. Пример: /gameinfo brawlstars');
+  }
+  
+  const gameId = match[1];
+  
+  try {
+    const result = await pool.query(
+      'SELECT * FROM games WHERE id = $1 OR slug = $1',
+      [gameId]
+    );
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(chatId, `❌ Игра с ID "${gameId}" не найдена`);
+    }
+    
+    const game = result.rows[0];
+    
+    let infoText = `🎮 *Информация об игре*\n\n`;
+    infoText += `🆔 **ID:** \`${game.id}\`\n`;
+    infoText += `📛 **Название:** ${game.name}\n`;
+    infoText += `🔗 **Slug:** \`${game.slug}\`\n\n`;
+    infoText += `🖼️ **Логотип:**\n${game.icon_url || 'не установлен'}\n\n`;
+    infoText += `🏞️ **Баннер:**\n${game.banner_url || 'не установлен'}\n\n`;
+    infoText += `📅 **Создана:** ${new Date(game.created_at).toLocaleString('ru-RU')}`;
+    
+    // Создаем клавиатуру для быстрых действий
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: '🖼️ Установить логотип', callback_data: `setlogo_prompt:${game.id}` },
+          { text: '🏞️ Установить баннер', callback_data: `setbanner_prompt:${game.id}` }
+        ],
+        [
+          { text: '📋 Список игр', callback_data: 'games_list' }
+        ]
+      ]
+    };
+    
+    await adminBot.sendMessage(chatId, infoText, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+    
+    // Отправляем предпросмотр, если есть оба изображения
+    if (game.icon_url || game.banner_url) {
+      const media = [];
+      if (game.icon_url) {
+        media.push({
+          type: 'photo',
+          media: game.icon_url,
+          caption: '🖼️ Логотип'
+        });
+      }
+      if (game.banner_url) {
+        media.push({
+          type: 'photo',
+          media: game.banner_url,
+          caption: '🏞️ Баннер'
+        });
+      }
+      
+      if (media.length > 0) {
+        await adminBot.sendMediaGroup(chatId, media);
+      }
+    }
+    
+  } catch (error) {
+    console.error('Ошибка получения информации об игре:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при получении информации');
+  }
+});
+
 // ===== КОМАНДА /working - ТЕХНИЧЕСКИЙ ПЕРЕРЫВ =====
 adminBot.onText(/\/working/, async (msg) => {
   if (!isAdmin(msg)) return;
@@ -2434,6 +2620,100 @@ adminBot.on('message', async (msg) => {
           );
         }
       }
+
+      if (userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
+    const gameId = userState.gameId;
+    
+    if (!text.startsWith('http://') && !text.startsWith('https://')) {
+      await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+      return;
+    }
+    
+    try {
+      await pool.query(
+        'UPDATE games SET icon_url = $1 WHERE id = $2',
+        [text, gameId]
+      );
+      
+      const gameResult = await pool.query(
+        'SELECT name FROM games WHERE id = $1',
+        [gameId]
+      );
+      
+      const gameName = gameResult.rows[0]?.name || gameId;
+      
+      await adminBot.sendMessage(
+        chatId,
+        `✅ Логотип для игры "${gameName}" установлен!\n\n` +
+        `🖼️ URL: ${text}`
+      );
+      
+      // Отправляем предпросмотр
+      try {
+        await adminBot.sendPhoto(chatId, text, {
+          caption: `🎮 Новый логотип для ${gameName}`,
+          parse_mode: 'Markdown'
+        });
+      } catch (previewError) {
+        console.error('Ошибка отправки предпросмотра:', previewError);
+      }
+      
+      delete userStates[chatId];
+      
+    } catch (error) {
+      console.error('Ошибка установки логотипа:', error);
+      await adminBot.sendMessage(chatId, '❌ Ошибка при установке логотипа');
+      delete userStates[chatId];
+    }
+    return;
+  }
+  
+  if (userState.action === 'setbanner' && userState.step === 'awaiting_banner_url') {
+    const gameId = userState.gameId;
+    
+    if (!text.startsWith('http://') && !text.startsWith('https://')) {
+      await adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+      return;
+    }
+    
+    try {
+      await pool.query(
+        'UPDATE games SET banner_url = $1 WHERE id = $2',
+        [text, gameId]
+      );
+      
+      const gameResult = await pool.query(
+        'SELECT name FROM games WHERE id = $1',
+        [gameId]
+      );
+      
+      const gameName = gameResult.rows[0]?.name || gameId;
+      
+      await adminBot.sendMessage(
+        chatId,
+        `✅ Баннер для игры "${gameName}" установлен!\n\n` +
+        `🏞️ URL: ${text}`
+      );
+      
+      // Отправляем предпросмотр
+      try {
+        await adminBot.sendPhoto(chatId, text, {
+          caption: `🏞️ Новый баннер для ${gameName}`,
+          parse_mode: 'Markdown'
+        });
+      } catch (previewError) {
+        console.error('Ошибка отправки предпросмотра:', previewError);
+      }
+      
+      delete userStates[chatId];
+      
+    } catch (error) {
+      console.error('Ошибка установки баннера:', error);
+      await adminBot.sendMessage(chatId, '❌ Ошибка при установке баннера');
+      delete userStates[chatId];
+    }
+    return;
+  }
       
       if (remainingAmount > 0) {
         await client.query(
@@ -2653,6 +2933,65 @@ adminBot.on('callback_query', async (cb) => {
   await adminBot.answerCallbackQuery(cb.id);
   return;
 }
+
+
+  if (data.startsWith('setlogo_prompt:')) {
+    const gameId = data.split(':')[1];
+    
+    userStates[chatId] = {
+      action: 'setlogo',
+      step: 'awaiting_logo_url',
+      gameId: gameId
+    };
+    
+    await adminBot.editMessageText(
+      `🖼️ *Установка логотипа для игры*\n\n` +
+      `Введите URL логотипа (изображение должно быть квадратным, рекомендуется 200x200):\n\n` +
+      `Пример: \`https://i.imgur.com/logo.png\``,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data.startsWith('setbanner_prompt:')) {
+    const gameId = data.split(':')[1];
+    
+    userStates[chatId] = {
+      action: 'setbanner',
+      step: 'awaiting_banner_url',
+      gameId: gameId
+    };
+    
+    await adminBot.editMessageText(
+      `🏞️ *Установка баннера для игры*\n\n` +
+      `Введите URL баннера (рекомендуемые размеры 1920x500):\n\n` +
+      `Пример: \`https://i.imgur.com/banner.jpg\``,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'Markdown'
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+
+  if (data === 'games_list') {
+    // Возвращаем список игр
+    const fakeMsg = { ...cb.message, text: '/games', chat: { id: chatId } };
+    await adminBot.emit('text', fakeMsg);
+    await adminBot.deleteMessage(chatId, messageId);
+    await adminBot.answerCallbackQuery(cb.id);
+    return;
+  }
+});
 
   if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -7098,6 +7437,86 @@ app.post('/api/auth/start-login', async (req, res) => {
   } catch (error) {
     console.error('Ошибка начала входа:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/games/:slug', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM games WHERE slug = $1 OR id = $1',
+      [slug]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      game: result.rows[0] 
+    });
+  } catch (error) {
+    console.error('Ошибка получения игры:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// Добавляем эндпоинт для обновления логотипа (для админ-панели)
+app.post('/api/admin/games/logo', async (req, res) => {
+  try {
+    const { gameId, logoUrl } = req.body;
+    
+    if (!gameId || !logoUrl) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    const result = await pool.query(
+      'UPDATE games SET icon_url = $1 WHERE id = $2 RETURNING *',
+      [logoUrl, gameId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      game: result.rows[0] 
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обновления логотипа:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// Добавляем эндпоинт для обновления баннера (для админ-панели)
+app.post('/api/admin/games/banner', async (req, res) => {
+  try {
+    const { gameId, bannerUrl } = req.body;
+    
+    if (!gameId || !bannerUrl) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    const result = await pool.query(
+      'UPDATE games SET banner_url = $1 WHERE id = $2 RETURNING *',
+      [bannerUrl, gameId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      game: result.rows[0] 
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обновления баннера:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
   }
 });
 
