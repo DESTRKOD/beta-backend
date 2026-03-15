@@ -678,6 +678,43 @@ async function initDB() {
     `);
     console.log('✅ Таблица wallets создана');
 
+
+    // Таблица игр
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS games (
+    id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    icon_url TEXT NOT NULL,
+    slug VARCHAR(50) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+console.log('✅ Таблица games создана');
+
+// Добавляем Brawl Stars по умолчанию
+await pool.query(`
+  INSERT INTO games (id, name, icon_url, slug) 
+  VALUES (
+    'brawlstars', 
+    'Brawl Stars', 
+    'https://i.imgur.com/3JxvXtR.png', 
+    'brawlstars'
+  ) ON CONFLICT (id) DO NOTHING
+`);
+console.log('✅ Игра Brawl Stars добавлена');
+
+// Добавляем game_id в products
+await pool.query(`
+  ALTER TABLE products ADD COLUMN IF NOT EXISTS game_id VARCHAR(50) 
+  DEFAULT 'brawlstars' REFERENCES games(id)
+`);
+console.log('✅ Колонка game_id добавлена в products');
+
+// Обновляем существующие товары
+await pool.query(`
+  UPDATE products SET game_id = 'brawlstars' WHERE game_id IS NULL
+`);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
@@ -1465,6 +1502,51 @@ adminBot.onText(/\/setrate(?:\s+(\d+(?:\.\d+)?))?/, async (msg, match) => {
   }
 });
 
+
+// ===== КОМАНДА /addgame - добавить новую игру =====
+adminBot.onText(/\/addgame/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  userStates[chatId] = {
+    action: 'add_game',
+    step: 'awaiting_name'
+  };
+  
+  adminBot.sendMessage(
+    chatId,
+    '🎮 Добавление новой игры\n\nШаг 1/3: Введите название игры (например, "Clash Royale"):'
+  );
+});
+
+// ===== КОМАНДА /games - список игр =====
+adminBot.onText(/\/games/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query('SELECT * FROM games ORDER BY name');
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(msg.chat.id, '📭 Нет игр в базе');
+    }
+    
+    let text = '🎮 Список игр:\n\n';
+    
+    result.rows.forEach((game, index) => {
+      text += `${index + 1}. ${game.name}\n`;
+      text += `   ID: ${game.id}\n`;
+      text += `   Slug: ${game.slug}\n`;
+      text += `   URL: ${game.icon_url}\n\n`;
+    });
+    
+    adminBot.sendMessage(msg.chat.id, text);
+  } catch (error) {
+    console.error('Ошибка получения игр:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении списка игр');
+  }
+});
+
 adminBot.onText(/\/addbalance(?:\s+(\d+)\s+(\d+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
@@ -1820,12 +1902,36 @@ adminBot.onText(/\/add_product/, async (msg) => {
   if (!isAdmin(msg)) return;
   
   const chatId = msg.chat.id;
-  userStates[chatId] = {
-    step: 'awaiting_name',
-    productData: {}
-  };
   
-  adminBot.sendMessage(chatId, '📝 Давайте добавим новый товар.\n\nШаг 1/4: Введите название товара:');
+  try {
+    // Получаем список игр для выбора
+    const games = await pool.query('SELECT id, name FROM games ORDER BY name');
+    
+    if (games.rows.length === 0) {
+      adminBot.sendMessage(chatId, '❌ Сначала добавьте игру через /addgame');
+      return;
+    }
+    
+    const keyboard = {
+      inline_keyboard: games.rows.map(game => [
+        { text: game.name, callback_data: `select_game:${game.id}` }
+      ])
+    };
+    
+    userStates[chatId] = {
+      action: 'add_product_select_game'
+    };
+    
+    adminBot.sendMessage(
+      chatId,
+      '🎮 Выберите игру для товара:',
+      { reply_markup: keyboard }
+    );
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения игр:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при загрузке списка игр');
+  }
 });
 
 adminBot.onText(/\/edit_price/, async (msg) => {
@@ -2148,6 +2254,12 @@ adminBot.on('message', async (msg) => {
     delete userStates[chatId];
     return;
   }
+
+
+  else if (userState.action === 'add_game') {
+  await handleAddGameStep(msg, userState);
+  return;
+}
      
   else if (userState.action === 'filter_user_id') {
     const userId = parseInt(text);
@@ -2466,6 +2578,27 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
+
+
+  if (data.startsWith('select_game:')) {
+  const gameId = data.split(':')[1];
+  
+  userStates[chatId] = {
+    step: 'awaiting_name',
+    productData: { game_id: gameId }
+  };
+  
+  await adminBot.editMessageText(
+    '📝 Добавление товара\n\nШаг 1/4: Введите название товара:',
+    {
+      chat_id: chatId,
+      message_id: messageId
+    }
+  );
+  
+  await adminBot.answerCallbackQuery(cb.id);
+  return;
+}
 
   if (data.startsWith('support_reply:')) {
     const dialogId = parseInt(data.split(':')[1]);
@@ -4267,75 +4400,81 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data.startsWith('set_gift:')) {
-    const isGift = data.split(':')[1];
-    const userState = userStates[chatId];
-    
-    if (!userState || userState.step !== 'awaiting_gift') {
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '❌ Сессия устарела. Начните заново командой /add_product',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    try {
-      const is_gift = isGift === '1';
-      userState.productData.is_gift = is_gift;
-      
-      const timestamp = Date.now();
-      const randomString = Math.random().toString(36).substring(2, 8);
-      const id = `prod_${timestamp}_${randomString}`;
-      
-      const { name, price, image_url } = userState.productData;
-      
-      await pool.query(
-        'INSERT INTO products (id, name, price, image_url, is_gift) VALUES ($1, $2, $3, $4, $5)',
-        [id, name, price, image_url, is_gift]
-      );
-      
-      const successText = `🎉 Товар успешно добавлен!\n\n` +
-        `📝 Информация о товаре:\n` +
-        `🆔 ID: \`${id}\`\n` +
-        `🏷️ Название: ${name}\n` +
-        `💰 Цена: ${formatRub(price)}\n` +
-        `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
-        `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
-      
-      delete userStates[chatId];
-      
-      await adminBot.editMessageText(successText, {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown'
-      });
-      
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '✅ Товар добавлен!',
-        show_alert: false
-      });
-      
-      await adminBot.sendMessage(
-        chatId,
-        `✅ Товар *${name}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
-        { parse_mode: 'Markdown' }
-      );
-      
-    } catch (error) {
-      console.error('❌ Ошибка сохранения товара:', error);
-      delete userStates[chatId];
-      
-      await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
-        chat_id: chatId,
-        message_id: messageId
-      });
-      
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '❌ Ошибка сохранения',
-        show_alert: true
-      });
-    }
+  const isGift = data.split(':')[1];
+  const userState = userStates[chatId];
+  
+  if (!userState || userState.step !== 'awaiting_gift') {
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: '❌ Сессия устарела. Начните заново командой /add_product',
+      show_alert: true 
+    });
     return;
   }
+  
+  try {
+    const is_gift = isGift === '1';
+    userState.productData.is_gift = is_gift;
+    
+    const timestamp = Date.now();
+    const randomString = Math.random().toString(36).substring(2, 8);
+    const id = `prod_${timestamp}_${randomString}`;
+    
+    const { name, price, image_url, game_id } = userState.productData;
+    
+    // ВСТАВЛЯЕМ СЮДА НОВЫЙ INSERT С game_id
+    await pool.query(
+      'INSERT INTO products (id, name, price, image_url, is_gift, game_id) VALUES ($1, $2, $3, $4, $5, $6)',
+      [id, name, price, image_url, is_gift, game_id]
+    );
+    
+    // Получаем название игры для красивого вывода
+    const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
+    const gameName = gameResult.rows[0]?.name || 'Неизвестно';
+    
+    const successText = `🎉 Товар успешно добавлен!\n\n` +
+      `📝 Информация о товаре:\n` +
+      `🆔 ID: \`${id}\`\n` +
+      `🎮 Игра: ${gameName}\n` +
+      `🏷️ Название: ${name}\n` +
+      `💰 Цена: ${formatRub(price)}\n` +
+      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+      `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
+    
+    delete userStates[chatId];
+    
+    await adminBot.editMessageText(successText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    });
+    
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: '✅ Товар добавлен!',
+      show_alert: false
+    });
+    
+    await adminBot.sendMessage(
+      chatId,
+      `✅ Товар *${name}* для игры *${gameName}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
+      { parse_mode: 'Markdown' }
+    );
+    
+  } catch (error) {
+    console.error('❌ Ошибка сохранения товара:', error);
+    delete userStates[chatId];
+    
+    await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+      chat_id: chatId,
+      message_id: messageId
+    });
+    
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: '❌ Ошибка сохранения',
+      show_alert: true
+    });
+  }
+  return;
+}
 
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
@@ -4387,6 +4526,89 @@ async function handleDateFilter(msg, filterType, callbackQueryId) {
   });
   
   await adminBot.emit('text', { ...msg, text: '/orders 1', chat: { id: chatId } });
+}
+
+async function handleAddGameStep(msg, userState) {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  
+  try {
+    switch(userState.step) {
+      case 'awaiting_name':
+        if (text.length < 2 || text.length > 50) {
+          adminBot.sendMessage(chatId, '❌ Название должно быть от 2 до 50 символов');
+          return;
+        }
+        userState.gameData = { name: text };
+        userState.step = 'awaiting_icon';
+        adminBot.sendMessage(
+          chatId, 
+          '✅ Название сохранено\n\nШаг 2/3: Введите URL изображения (иконки) игры:'
+        );
+        break;
+        
+      case 'awaiting_icon':
+        if (!text.startsWith('http://') && !text.startsWith('https://')) {
+          adminBot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+          return;
+        }
+        userState.gameData.icon_url = text;
+        userState.step = 'awaiting_slug';
+        adminBot.sendMessage(
+          chatId,
+          '✅ Иконка сохранена\n\nШаг 3/3: Введите slug для URL (например, "clashroyale"):\n\nТолько латинские буквы и цифры, без пробелов'
+        );
+        break;
+        
+      case 'awaiting_slug':
+        if (!/^[a-z0-9]+$/.test(text)) {
+          adminBot.sendMessage(chatId, '❌ Slug должен содержать только латинские буквы в нижнем регистре и цифры');
+          return;
+        }
+        
+        const slug = text.toLowerCase();
+        const gameId = slug;
+        const { name, icon_url } = userState.gameData;
+        
+        // Проверяем, нет ли уже такой игры
+        const existing = await pool.query(
+          'SELECT id FROM games WHERE slug = $1 OR id = $2',
+          [slug, gameId]
+        );
+        
+        if (existing.rows.length > 0) {
+          adminBot.sendMessage(chatId, '❌ Игра с таким slug уже существует');
+          return;
+        }
+        
+        await pool.query(
+          `INSERT INTO games (id, name, icon_url, slug) 
+           VALUES ($1, $2, $3, $4)`,
+          [gameId, name, icon_url, slug]
+        );
+        
+        const successText = `✅ Игра успешно добавлена!\n\n` +
+          `📝 Информация:\n` +
+          `🆔 ID: ${gameId}\n` +
+          `🏷️ Название: ${name}\n` +
+          `🔗 Slug: ${slug}\n` +
+          `🖼️ Иконка: ${icon_url}`;
+        
+        delete userStates[chatId];
+        adminBot.sendMessage(chatId, successText);
+        
+        // Уведомление в общий чат
+        await adminBot.sendMessage(
+          ADMIN_ID,
+          `🎮 Новая игра добавлена!\n\n${name} (${slug})`
+        );
+        break;
+    }
+  } catch (error) {
+    console.error('❌ Ошибка добавления игры:', error);
+    adminBot.sendMessage(chatId, '❌ Произошла ошибка. Начните заново командой /addgame');
+    delete userStates[chatId];
+  }
 }
 
 async function showSupportDialog(msg, dialogId, callbackQueryId) {
@@ -4807,6 +5029,14 @@ async function handleAddProductStep(msg, userState) {
         }
         userState.productData.image_url = text;
         userState.step = 'awaiting_gift';
+        
+        // Получаем game_id из сохраненных данных
+        const gameId = userState.productData.game_id;
+        
+        // Получаем название игры для отображения
+        const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [gameId]);
+        const gameName = gameResult.rows[0]?.name || 'неизвестно';
+        
         const keyboard = {
           reply_markup: {
             inline_keyboard: [
@@ -4817,7 +5047,11 @@ async function handleAddProductStep(msg, userState) {
             ]
           }
         };
-        adminBot.sendMessage(chatId, '✅ URL изображения сохранен.\n\nШаг 4/4: Это подарочный товар?', keyboard);
+        adminBot.sendMessage(
+          chatId, 
+          `✅ URL изображения сохранен.\n\n🎮 Игра: ${gameName}\n📝 Название: ${userState.productData.name}\n💰 Цена: ${formatRub(userState.productData.price)}\n\nШаг 4/4: Это подарочный товар?`, 
+          keyboard
+        );
         break;
         
       case 'awaiting_gift':
@@ -7474,10 +7708,80 @@ app.get('/api/order-status/:orderId', async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM products ORDER BY price');
+    const { game } = req.query; // получаем параметр game из URL
+    
+    let query = 'SELECT * FROM products';
+    let params = [];
+    
+    if (game) {
+      query += ' WHERE game_id = $1 ORDER BY price';
+      params = [game];
+    } else {
+      query += ' ORDER BY price';
+    }
+    
+    const result = await pool.query(query, params);
     res.json({ success: true, products: result.rows });
   } catch (error) {
     console.error('Ошибка получения товаров:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// ===== GET /api/games - список всех игр =====
+app.get('/api/games', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM games ORDER BY name');
+    res.json({ 
+      success: true, 
+      games: result.rows 
+    });
+  } catch (error) {
+    console.error('Ошибка получения игр:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// ===== GET /api/games/:slug - информация об игре =====
+app.get('/api/games/:slug', async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const result = await pool.query(
+      'SELECT * FROM games WHERE slug = $1',
+      [slug]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      game: result.rows[0] 
+    });
+  } catch (error) {
+    console.error('Ошибка получения игры:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// ===== POST /api/admin/add-game (для админ-бота) =====
+app.post('/api/admin/add-game', async (req, res) => {
+  try {
+    const { id, name, icon_url, slug } = req.body;
+    
+    // Генерируем ID если не передан
+    const gameId = id || slug.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    await pool.query(
+      `INSERT INTO games (id, name, icon_url, slug) 
+       VALUES ($1, $2, $3, $4)`,
+      [gameId, name, icon_url, slug]
+    );
+    
+    res.json({ success: true, gameId });
+  } catch (error) {
+    console.error('Ошибка добавления игры:', error);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
