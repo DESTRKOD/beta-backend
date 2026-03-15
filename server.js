@@ -665,6 +665,12 @@ async function initDB() {
     `);
     console.log('✅ Таблица orders создана');
 
+
+    // После создания таблицы games добавить поле banner_url
+    await pool.query(`
+      ALTER TABLE games ADD COLUMN IF NOT EXISTS banner_url TEXT
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
@@ -1518,6 +1524,54 @@ adminBot.onText(/\/addgame/, async (msg) => {
     chatId,
     '🎮 Добавление новой игры\n\nШаг 1/3: Введите название игры (например, "Clash Royale"):'
   );
+});
+
+
+adminBot.onText(/\/setbanner(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
+  if (!isAdmin(msg)) return;
+  
+  const chatId = msg.chat.id;
+  
+  if (!match[1] || !match[2]) {
+    return adminBot.sendMessage(chatId, '❌ Использование: /setbanner ID_ИГРЫ URL_БАННЕРА\n\nПример: /setbanner brawlstars https://i.imgur.com/banner.jpg');
+  }
+  
+  const gameId = match[1];
+  const bannerUrl = match[2];
+  
+  try {
+    await pool.query(
+      'UPDATE games SET banner_url = $1 WHERE id = $2 OR slug = $2',
+      [bannerUrl, gameId]
+    );
+    
+    adminBot.sendMessage(chatId, `✅ Баннер для игры ${gameId} успешно установлен!`);
+  } catch (error) {
+    console.error('Ошибка установки баннера:', error);
+    adminBot.sendMessage(chatId, '❌ Ошибка при установке баннера');
+  }
+});
+
+adminBot.onText(/\/banners/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  
+  try {
+    const result = await pool.query('SELECT id, name, banner_url FROM games WHERE banner_url IS NOT NULL');
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных баннеров');
+    }
+    
+    let text = '🖼️ Установленные баннеры:\n\n';
+    result.rows.forEach(game => {
+      text += `🎮 ${game.name} (${game.id})\n${game.banner_url}\n\n`;
+    });
+    
+    adminBot.sendMessage(msg.chat.id, text);
+  } catch (error) {
+    console.error('Ошибка получения баннеров:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении баннеров');
+  }
 });
 
 // ===== КОМАНДА /games - список игр =====
@@ -7729,10 +7783,9 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-// ===== GET /api/games - список всех игр =====
 app.get('/api/games', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM games ORDER BY name');
+    const result = await pool.query('SELECT id, name, slug, icon_url, banner_url FROM games ORDER BY name');
     res.json({ 
       success: true, 
       games: result.rows 
