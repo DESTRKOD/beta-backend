@@ -5346,11 +5346,11 @@ async function handleAddProductStep(msg, userState) {
         
       case 'awaiting_gift':
         adminBot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора типа товара.');
-        retutn;
+        return;
         
       case 'awaiting_new':
         adminBot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора метки NEW.');
-        retutn;
+        return;
     }
     
     userStates[chatId] = userState;
