@@ -1061,7 +1061,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         }
       }
       
-      else if (action === 'login' && authSessions.has(token)) {
+      if (action === 'login' && authSessions.has(token)) {
         const session = authSessions.get(token);
         
         if (session.type === 'login') {
@@ -1147,47 +1147,44 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
           }
         }
       }
-      
-      const keyboard = {
-        inline_keyboard: [[
-          { 
-            text: '🛒 Перейти в магазин', 
-            url: SITE_URL 
-          }
-        ]]
-      };
-      
-      await userBot.sendMessage(chatId, 
-        `👋 Привет${userFirstName ? `, ${userFirstName}` : ''}!\n\n` +
-        `Я бот для авторизации в магазине Duck Shop.\n\n` +
-        `Для входа или регистрации:\n` +
-        `1. Перейдите на сайт магазина\n` +
-        `2. Нажмите кнопку "Войти"\n` +
-        `3. Выберите "Войти" или "Зарегистрироваться"\n` +
-        `4. Перейдите по полученной ссылке\n\n` +
-        `Это быстро, безопасно и не требует ввода пароля!`, 
-        { reply_markup: keyboard }
-      );
-      
-    } catch (error) {
-      console.error('❌ Ошибка обработки /start в userBot:', error);
-      
-      try {
-        await userBot.sendMessage(chatId, 
-          `❌ Произошла ошибка при обработке вашего запроса.\n\n` +
-          `Пожалуйста, попробуйте:\n` +
-          `1. Перезагрузить страницу магазина\n` +
-          `2. Повторить попытку авторизации\n` +
-          `3. Если проблема persists, свяжитесь с поддержкой\n\n` +
-          `Ссылка на магазин: ${SITE_URL}`
-        );
-      } catch (sendError) {}
     }
+    
+    const keyboard = {
+      inline_keyboard: [[
+        { 
+          text: '🛒 Перейти в магазин', 
+          url: SITE_URL 
+        }
+      ]]
+    };
+    
+    await userBot.sendMessage(chatId, 
+      `👋 Привет${userFirstName ? `, ${userFirstName}` : ''}!\n\n` +
+      `Я бот для авторизации в магазине Duck Shop.\n\n` +
+      `Для входа или регистрации:\n` +
+      `1. Перейдите на сайт магазина\n` +
+      `2. Нажмите кнопку "Войти"\n` +
+      `3. Выберите "Войти" или "Зарегистрироваться"\n` +
+      `4. Перейдите по полученной ссылке\n\n` +
+      `Это быстро, безопасно и не требует ввода пароля!`, 
+      { reply_markup: keyboard }
+    );
+    
   } catch (error) {
     console.error('❌ Ошибка обработки /start в userBot:', error);
+    
+    try {
+      await userBot.sendMessage(chatId, 
+        `❌ Произошла ошибка при обработке вашего запроса.\n\n` +
+        `Пожалуйста, попробуйте:\n` +
+        `1. Перезагрузить страницу магазина\n` +
+        `2. Повторить попытку авторизации\n` +
+        `3. Если проблема persists, свяжитесь с поддержкой\n\n` +
+        `Ссылка на магазин: ${SITE_URL}`
+      );
+    } catch (sendError) {}
   }
 });
-
 adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
