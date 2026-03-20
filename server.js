@@ -502,6 +502,23 @@ app.get('/api/auth/vk/callback', async (req, res, next) => {
   }
 });
 
+// Очистка устаревших сессий (каждые 5 минут)
+setInterval(() => {
+  const now = Date.now();
+  let deletedCount = 0;
+  
+  for (const [key, session] of authSessions.entries()) {
+    if (now - (session.createdAt || 0) > 10 * 60 * 1000) { // 10 минут
+      authSessions.delete(key);
+      deletedCount++;
+    }
+  }
+  
+  if (deletedCount > 0) {
+    console.log(`🧹 Очищено ${deletedCount} устаревших сессий`);
+  }
+}, 5 * 60 * 1000);
+
 let adminBot;
 let userBot;
 
@@ -947,191 +964,192 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         }
       }
       
-      if (action === 'reg' && authSessions.has(token)) {
-        const session = authSessions.get(token);
-        
-        if (session.type === 'register') {
-          console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
-          
-          const existingUser = await pool.query(
-            'SELECT id FROM users WHERE tg_id = $1',
-            [userId]
-          );
-          
-          if (existingUser.rows.length > 0) {
-            await userBot.sendMessage(chatId, 
-              `❌ Этот Telegram аккаунт уже зарегистрирован!\n\n` +
-              `Попробуйте войти через "Вход" на сайте.`
-            );
-            authSessions.delete(token);
-            return;
-          }
-          
-          let username = '';
-          
-          if (userFirstName && userLastName) {
-            username = `${userFirstName} ${userLastName}`;
-          } else if (userFirstName) {
-            username = userFirstName;
-          } else if (userLastName) {
-            username = userLastName;
-          } else if (userUsername) {
-            username = userUsername;
-          } else {
-            username = `User_${userId}`;
-          }
-          
-          if (username.length > 50) {
-            username = username.substring(0, 47) + '...';
-          }
-          
-          let photoUrl = null;
-          try {
-            const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
-            if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
-              const file = await userBot.getFile(photos.photos[0][0].file_id);
-              if (file && file.file_path) {
-                photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
-              }
-            }
-          } catch (photoError) {}
-          
-          const result = await pool.query(
-            `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username, auth_provider) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7) 
-             RETURNING id`,
-            [userId, username, photoUrl, userFirstName, userLastName, userUsername, 'telegram']
-          );
-          
-          const user = result.rows[0];
-          
-          authSessions.set(`auth_${token}`, {
-            userId: user.id,
-            tgId: userId,
-            username: username,
-            firstName: userFirstName,
-            lastName: userLastName,
-            telegramUsername: userUsername,
-            avatarUrl: photoUrl,
-            type: 'auth_success'
-          });
-          
-          authSessions.delete(token);
-          
-          const keyboard = {
-            inline_keyboard: [[
-              { 
-                text: '✅ Перейти в магазин', 
-                url: `${SITE_URL}/index.html?auth=${token}` 
-              }
-            ]]
-          };
-          
-          await userBot.sendMessage(chatId, `✅ Регистрация успешна!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
-          
-          try {
-            const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
-              `🆔 TG ID: ${userId}\n` +
-              `📛 Имя: ${username}\n` +
-              (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
-              (userLastName ? `👤 Фамилия в TG: ${userLastName}\n` : '') +
-              (userUsername ? `👤 Username: @${userUsername}\n` : '') +
-              `📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
-            
-            await adminBot.sendMessage(ADMIN_ID, adminText);
-          } catch (adminError) {}
-          
-          return;
+     if (action === 'reg' && authSessions.has(token)) {
+  const session = authSessions.get(token);
+  
+  if (session.type === 'register') {
+    console.log(`📝 Регистрация пользователя ${userId} (${fullName})`);
+    
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE tg_id = $1',
+      [userId]
+    );
+    
+    if (existingUser.rows.length > 0) {
+      await userBot.sendMessage(chatId, 
+        `❌ Этот Telegram аккаунт уже зарегистрирован!\n\n` +
+        `Попробуйте войти через "Вход" на сайте.`
+      );
+      authSessions.delete(token);
+      return;
+    }
+    
+    let username = '';
+    
+    if (userFirstName && userLastName) {
+      username = `${userFirstName} ${userLastName}`;
+    } else if (userFirstName) {
+      username = userFirstName;
+    } else if (userLastName) {
+      username = userLastName;
+    } else if (userUsername) {
+      username = userUsername;
+    } else {
+      username = `User_${userId}`;
+    }
+    
+    if (username.length > 50) {
+      username = username.substring(0, 47) + '...';
+    }
+    
+    let photoUrl = null;
+    try {
+      const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
+      if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
+        const file = await userBot.getFile(photos.photos[0][0].file_id);
+        if (file && file.file_path) {
+          photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
         }
       }
+    } catch (photoError) {}
+    
+    const result = await pool.query(
+      `INSERT INTO users (tg_id, username, avatar_url, first_name, last_name, telegram_username, auth_provider) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) 
+       RETURNING id, username, first_name, last_name, telegram_username, avatar_url`,
+      [userId, username, photoUrl, userFirstName, userLastName, userUsername, 'telegram']
+    );
+    
+    const user = result.rows[0];
+    
+    // СОЗДАЕМ СЕССИЮ С ПРЕФИКСОМ auth_
+    authSessions.set(`auth_${token}`, {
+      userId: user.id,
+      tgId: userId,
+      username: user.username,
+      firstName: user.first_name,
+      lastName: user.last_name,
+      telegramUsername: user.telegram_username,
+      avatarUrl: user.avatar_url,
+      type: 'auth_success'
+    });
+    
+    authSessions.delete(token);
+    
+    const keyboard = {
+      inline_keyboard: [[
+        { 
+          text: '✅ Перейти в магазин', 
+          url: `${SITE_URL}/index.html?auth=${token}` 
+        }
+      ]]
+    };
+    
+    await userBot.sendMessage(chatId, `✅ Регистрация успешна!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
+    
+    try {
+      const adminText = `👤 Новый пользователь зарегистрировался!\n\n` +
+        `🆔 TG ID: ${userId}\n` +
+        `📛 Имя: ${username}\n` +
+        (userFirstName ? `👤 Имя в TG: ${userFirstName}\n` : '') +
+        (userLastName ? `👤 Фамилия в TG: ${userLastName}\n` : '') +
+        (userUsername ? `👤 Username: @${userUsername}\n` : '') +
+        `📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
+      
+      await adminBot.sendMessage(ADMIN_ID, adminText);
+    } catch (adminError) {}
+    
+    return;
+  }
+}
       
       else if (action === 'login' && authSessions.has(token)) {
-        const session = authSessions.get(token);
-        
-        if (session.type === 'login') {
-          console.log(`🔐 Вход пользователя ${userId} (${fullName})`);
-          
-          const userResult = await pool.query(
-            'SELECT id, username, avatar_url FROM users WHERE tg_id = $1',
-            [userId]
-          );
-          
-          if (userResult.rows.length > 0) {
-            const user = userResult.rows[0];
-            
-            let photoUrl = user.avatar_url;
-            try {
-              const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
-              if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
-                const file = await userBot.getFile(photos.photos[0][0].file_id);
-                if (file && file.file_path) {
-                  photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
-                  
-                  await pool.query(
-                    'UPDATE users SET avatar_url = $1 WHERE id = $2',
-                    [photoUrl, user.id]
-                  );
-                }
-              }
-            } catch (photoError) {}
+  const session = authSessions.get(token);
+  
+  if (session.type === 'login') {
+    console.log(`🔐 Вход пользователя ${userId} (${fullName})`);
+    
+    const userResult = await pool.query(
+      'SELECT id, username, avatar_url, first_name, last_name, telegram_username FROM users WHERE tg_id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length > 0) {
+      const user = userResult.rows[0];
+      
+      let photoUrl = user.avatar_url;
+      try {
+        const photos = await userBot.getUserProfilePhotos(userId, { limit: 1 });
+        if (photos && photos.total_count > 0 && photos.photos[0] && photos.photos[0][0]) {
+          const file = await userBot.getFile(photos.photos[0][0].file_id);
+          if (file && file.file_path) {
+            photoUrl = `https://api.telegram.org/file/bot${USER_BOT_TOKEN}/${file.file_path}`;
             
             await pool.query(
-              `UPDATE users SET 
-                last_login = CURRENT_TIMESTAMP,
-                first_name = COALESCE($1, first_name),
-                last_name = COALESCE($2, last_name),
-                telegram_username = COALESCE($3, telegram_username),
-                avatar_url = COALESCE($4, avatar_url)
-               WHERE id = $5`,
-              [userFirstName, userLastName, userUsername, photoUrl, user.id]
+              'UPDATE users SET avatar_url = $1 WHERE id = $2',
+              [photoUrl, user.id]
             );
-            
-            const fullUserResult = await pool.query(
-              'SELECT username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
-              [user.id]
-            );
-            
-            const fullUser = fullUserResult.rows[0];
-            
-            authSessions.set(`auth_${token}`, {
-              userId: user.id,
-              tgId: userId,
-              username: fullUser.username,
-              firstName: fullUser.first_name,
-              lastName: fullUser.last_name,
-              telegramUsername: fullUser.telegram_username,
-              avatarUrl: fullUser.avatar_url,
-              type: 'auth_success'
-            });
-            
-            authSessions.delete(token);
-            
-            const keyboard = {
-              inline_keyboard: [[
-                { 
-                  text: '✅ Перейти в магазин', 
-                  url: `${SITE_URL}/index.html?auth=${token}` 
-                }
-              ]]
-            };
-            
-            await userBot.sendMessage(chatId, `✅ Вход выполнен!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
-            
-            return;
-          } else {
-            await userBot.sendMessage(chatId, 
-              `❌ Аккаунт не найден!\n\n` +
-              `Похоже, вы еще не зарегистрированы в нашем магазине.\n` +
-              `Пожалуйста, перейдите на сайт магазина и нажмите "Зарегистрироваться".\n\n` +
-              `Ссылка на магазин: ${SITE_URL}`
-            );
-            
-            authSessions.delete(token);
-            return;
           }
         }
-      }
+      } catch (photoError) {}
+      
+      await pool.query(
+        `UPDATE users SET 
+          last_login = CURRENT_TIMESTAMP,
+          first_name = COALESCE($1, first_name),
+          last_name = COALESCE($2, last_name),
+          telegram_username = COALESCE($3, telegram_username),
+          avatar_url = COALESCE($4, avatar_url)
+         WHERE id = $5`,
+        [userFirstName, userLastName, userUsername, photoUrl, user.id]
+      );
+      
+      const fullUserResult = await pool.query(
+        'SELECT id, username, first_name, last_name, telegram_username, avatar_url FROM users WHERE id = $1',
+        [user.id]
+      );
+      
+      const fullUser = fullUserResult.rows[0];
+      
+      // СОЗДАЕМ СЕССИЮ С ПРЕФИКСОМ auth_
+      authSessions.set(`auth_${token}`, {
+        userId: fullUser.id,
+        tgId: userId,
+        username: fullUser.username,
+        firstName: fullUser.first_name,
+        lastName: fullUser.last_name,
+        telegramUsername: fullUser.telegram_username,
+        avatarUrl: fullUser.avatar_url,
+        type: 'auth_success'
+      });
+      
+      authSessions.delete(token);
+      
+      const keyboard = {
+        inline_keyboard: [[
+          { 
+            text: '✅ Перейти в магазин', 
+            url: `${SITE_URL}/index.html?auth=${token}` 
+          }
+        ]]
+      };
+      
+      await userBot.sendMessage(chatId, `✅ Вход выполнен!\n\nНажмите кнопку ниже для перехода в магазин:`, { reply_markup: keyboard });
+      
+      return;
+    } else {
+      await userBot.sendMessage(chatId, 
+        `❌ Аккаунт не найден!\n\n` +
+        `Похоже, вы еще не зарегистрированы в нашем магазине.\n` +
+        `Пожалуйста, перейдите на сайт магазина и нажмите "Зарегистрироваться".\n\n` +
+        `Ссылка на магазин: ${SITE_URL}`
+      );
+      
+      authSessions.delete(token);
+      return;
     }
+  }
+}
     
     const keyboard = {
       inline_keyboard: [[
@@ -7636,50 +7654,80 @@ app.get('/api/auth/check/:token', async (req, res) => {
     const { token } = req.params;
     const authKey = `auth_${token}`;
     
+    console.log("═".repeat(50));
+    console.log("🔐 AUTH CHECK");
+    console.log("Токен:", token);
+    console.log("Все ключи сессий:", Array.from(authSessions.keys()).map(k => ({
+      key: k,
+      type: authSessions.get(k)?.type,
+      userId: authSessions.get(k)?.userId
+    })));
+    console.log("═".repeat(50));
+    
+    let session = null;
+    let sessionKey = null;
+    
     if (authSessions.has(authKey)) {
-      const session = authSessions.get(authKey);
+      session = authSessions.get(authKey);
+      sessionKey = authKey;
+      console.log('✅ Найдена сессия по ключу auth_${token}');
+    } else if (authSessions.has(token)) {
+      session = authSessions.get(token);
+      sessionKey = token;
+      console.log('✅ Найдена сессия по прямому ключу token');
+    }
+    
+    if (session && session.type === 'auth_success') {
+      console.log('✅ Тип сессии: auth_success, userId:', session.userId);
       
-      if (session.type === 'auth_success') {
-        const userResult = await pool.query(
-          'SELECT id, tg_id, username, first_name, last_name, telegram_username, auth_provider, avatar_url, email, vk_email, vk_first_name, vk_last_name, vk_avatar_url FROM users WHERE id = $1',
-          [session.userId]
-        );
-        
-        if (userResult.rows.length === 0) {
-          return res.json({
-            success: true,
-            authenticated: false,
-            expired: true
-          });
-        }
-        
-        const user = userResult.rows[0];
-        
-        authSessions.delete(authKey);
-        
-        res.json({
+      const userResult = await pool.query(
+        `SELECT 
+          id, tg_id, username, first_name, last_name,
+          telegram_username, auth_provider, avatar_url, created_at,
+          email, vk_email, vk_first_name, vk_last_name, vk_avatar_url
+         FROM users WHERE id = $1`,
+        [session.userId]
+      );
+      
+      if (userResult.rows.length === 0) {
+        console.log('❌ Пользователь не найден в БД');
+        return res.json({
           success: true,
-          authenticated: true,
-          user: {
-            id: user.id,
-            tgId: user.tg_id,
-            username: user.username,
-            firstName: user.vk_first_name || user.first_name,
-            lastName: user.vk_last_name || user.last_name,
-            telegramUsername: user.telegram_username,
-            auth_provider: user.auth_provider,
-            avatarUrl: user.vk_avatar_url || user.avatar_url,
-            email: user.vk_email || user.email
-          }
+          authenticated: false,
+          expired: true
         });
       }
+      
+      const user = userResult.rows[0];
+      
+      authSessions.delete(sessionKey);
+      console.log('✅ Сессия удалена');
+      
+      res.json({
+        success: true,
+        authenticated: true,
+        user: {
+          id: user.id,
+          tgId: user.tg_id,
+          username: user.username,
+          firstName: user.vk_first_name || user.first_name,
+          lastName: user.vk_last_name || user.last_name,
+          telegramUsername: user.telegram_username,
+          auth_provider: user.auth_provider,
+          avatarUrl: user.vk_avatar_url || user.avatar_url,
+          email: user.vk_email || user.email
+        }
+      });
+      
     } else if (authSessions.has(token)) {
+      console.log('⏳ Сессия в ожидании');
       res.json({
         success: true,
         authenticated: false,
         pending: true
       });
     } else {
+      console.log('❌ Сессия не найдена или истекла');
       res.json({
         success: true,
         authenticated: false,
@@ -7688,7 +7736,7 @@ app.get('/api/auth/check/:token', async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('Ошибка проверки авторизации:', error);
+    console.error('❌ Ошибка проверки авторизации:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
