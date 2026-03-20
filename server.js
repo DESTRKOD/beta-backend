@@ -8067,7 +8067,7 @@ app.get('/api/products', async (req, res) => {
   try {
     const { game } = req.query;
     
-    let query = 'SELECT id, name, price, image_url, is_gift, is_new FROM products';
+    let query = 'SELECT id, name, price, image_url, is_gift, is_new, game_id FROM products';
     let params = [];
     
     if (game) {
