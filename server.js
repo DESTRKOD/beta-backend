@@ -4289,7 +4289,7 @@ adminBot.on('callback_query', async (cb) => {
   return;
 }
 
- if (data.startsWith('set_new:')) {
+if (data.startsWith('set_new:')) {
   const isNew = data.split(':')[1];
   const userState = userStates[chatId];
   
@@ -4326,7 +4326,10 @@ adminBot.on('callback_query', async (cb) => {
       `🆕 Новинка: ${newFlag ? '✅ Да' : '❌ Нет'}\n` +
       `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
     
-    await adminBot.deleteMessage(chatId, messageId);
+    if (userState.messageId) {
+      await adminBot.deleteMessage(chatId, userState.messageId).catch(e => console.log('Ошибка удаления:', e.message));
+    }
+    await adminBot.deleteMessage(chatId, messageId).catch(e => console.log('Ошибка удаления:', e.message));
     await adminBot.sendMessage(chatId, successText, { parse_mode: 'Markdown' });
     
     delete userStates[chatId];
@@ -4339,10 +4342,7 @@ adminBot.on('callback_query', async (cb) => {
   } catch (error) {
     console.error('❌ Ошибка сохранения товара:', error);
     delete userStates[chatId];
-    
-    await adminBot.deleteMessage(chatId, messageId);
     await adminBot.sendMessage(chatId, '❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product');
-    
     await adminBot.answerCallbackQuery(cb.id, { 
       text: '❌ Ошибка сохранения',
       show_alert: true
