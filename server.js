@@ -5351,9 +5351,6 @@ async function handleAddProductStep(msg, userState) {
       case 'awaiting_new':
         adminBot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора метки NEW.');
         return;
-        
-      default:
-        break;
     }
     
     userStates[chatId] = userState;
