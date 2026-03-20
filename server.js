@@ -672,6 +672,12 @@ async function initDB() {
     `);
 
     await pool.query(`
+      ALTER TABLE products 
+      ADD COLUMN IF NOT EXISTS is_new BOOLEAN DEFAULT FALSE
+    `);
+    console.log('✅ Колонка is_new добавлена в products');
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS wallets (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE UNIQUE,
@@ -4253,79 +4259,120 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data.startsWith('set_gift:')) {
-    const isGift = data.split(':')[1];
-    const userState = userStates[chatId];
-    
-    if (!userState || userState.step !== 'awaiting_gift') {
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '❌ Сессия устарела. Начните заново командой /add_product',
-        show_alert: true 
-      });
-      return;
-    }
-    
-    try {
-      const is_gift = isGift === '1';
-      userState.productData.is_gift = is_gift;
-      
-      const timestamp = Date.now();
-      const randomString = Math.random().toString(36).substring(2, 8);
-      const id = `prod_${timestamp}_${randomString}`;
-      
-      const { name, price, image_url, game_id } = userState.productData;
-      
-      await pool.query(
-        'INSERT INTO products (id, name, price, image_url, is_gift, game_id) VALUES ($1, $2, $3, $4, $5, $6)',
-        [id, name, price, image_url, is_gift, game_id]
-      );
-      
-      const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
-      const gameName = gameResult.rows[0]?.name || 'Неизвестно';
-      
-      const successText = `🎉 Товар успешно добавлен!\n\n` +
-        `📝 Информация о товаре:\n` +
-        `🆔 ID: \`${id}\`\n` +
-        `🎮 Игра: ${gameName}\n` +
-        `🏷️ Название: ${name}\n` +
-        `💰 Цена: ${formatRub(price)}\n` +
-        `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
-        `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
-      
-      delete userStates[chatId];
-      
-      await adminBot.editMessageText(successText, {
-        chat_id: chatId,
-        message_id: messageId,
-        parse_mode: 'Markdown'
-      });
-      
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '✅ Товар добавлен!',
-        show_alert: false
-      });
-      
-      await adminBot.sendMessage(
-        chatId,
-        `✅ Товар *${name}* для игры *${gameName}* успешно добавлен в каталог!\n\nИспользуйте /products чтобы увидеть все товары.`,
-        { parse_mode: 'Markdown' }
-      );
-      
-    } catch (error) {
-      console.error('❌ Ошибка сохранения товара:', error);
-      delete userStates[chatId];
-      
-      await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
-        chat_id: chatId,
-        message_id: messageId
-      });
-      
-      await adminBot.answerCallbackQuery(cb.id, { 
-        text: '❌ Ошибка сохранения',
-        show_alert: true
-      });
-    }
+  const isGift = data.split(':')[1];
+  const userState = userStates[chatId];
+  
+  if (!userState || userState.step !== 'awaiting_gift') {
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново командой /add_product', show_alert: true });
     return;
   }
+  
+  try {
+    const is_gift = isGift === '1';
+    userState.productData.is_gift = is_gift;
+    userState.step = 'awaiting_new';
+    
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '🆕 Да, новый товар', callback_data: 'set_new:1' },
+            { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
+          ]
+        ]
+      }
+    };
+    
+    await adminBot.editMessageText(
+      `✅ Тип товара сохранен.\n\n📝 Название: ${userState.productData.name}\n💰 Цена: ${formatRub(userState.productData.price)}\n🎁 Подарок: ${is_gift ? 'Да' : 'Нет'}\n\nШаг 5/5: Отметить как "Новое"?`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: keyboard
+      }
+    );
+    
+    await adminBot.answerCallbackQuery(cb.id);
+    
+  } catch (error) {
+    console.error('❌ Ошибка:', error);
+    delete userStates[chatId];
+    await adminBot.editMessageText('❌ Ошибка. Попробуйте заново командой /add_product', {
+      chat_id: chatId,
+      message_id: messageId
+    });
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+  }
+  return;
+}
+
+
+  if (data.startsWith('set_new:')) {
+  const isNew = data.split(':')[1];
+  const userState = userStates[chatId];
+  
+  if (!userState || userState.step !== 'awaiting_new') {
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново командой /add_product', show_alert: true });
+    return;
+  }
+  
+  try {
+    const is_new = isNew === '1';
+    userState.productData.is_new = is_new;
+    
+    const timestamp = Date.now();
+    const randomString = Math.random().toString(36).substring(2, 8);
+    const id = `prod_${timestamp}_${randomString}`;
+    
+    const { name, price, image_url, game_id, is_gift, is_new: newFlag } = userState.productData;
+    
+    await pool.query(
+      'INSERT INTO products (id, name, price, image_url, is_gift, is_new, game_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [id, name, price, image_url, is_gift, newFlag, game_id]
+    );
+    
+    const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
+    const gameName = gameResult.rows[0]?.name || 'Неизвестно';
+    
+    const successText = `🎉 Товар успешно добавлен!\n\n` +
+      `📝 Информация о товаре:\n` +
+      `🆔 ID: \`${id}\`\n` +
+      `🎮 Игра: ${gameName}\n` +
+      `🏷️ Название: ${name}\n` +
+      `💰 Цена: ${formatRub(price)}\n` +
+      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+      `🆕 Новинка: ${newFlag ? '✅ Да' : '❌ Нет'}\n` +
+      `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
+    
+    delete userStates[chatId];
+    
+    await adminBot.editMessageText(successText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    });
+    
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: '✅ Товар добавлен!',
+      show_alert: false
+    });
+    
+  } catch (error) {
+    console.error('❌ Ошибка сохранения товара:', error);
+    delete userStates[chatId];
+    
+    await adminBot.editMessageText('❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product', {
+      chat_id: chatId,
+      message_id: messageId
+    });
+    
+    await adminBot.answerCallbackQuery(cb.id, { 
+      text: '❌ Ошибка сохранения',
+      show_alert: true
+    });
+  }
+  return;
+}
 
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
@@ -5253,7 +5300,7 @@ async function handleAddProductStep(msg, userState) {
         }
         userState.productData.name = text;
         userState.step = 'awaiting_price';
-        adminBot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/4: Введите цену товара (в рублях, только цифры):');
+        adminBot.sendMessage(chatId, '✅ Название сохранено.\n\nШаг 2/5: Введите цену товара (в рублях, только цифры):');
         break;
         
       case 'awaiting_price':
@@ -5264,7 +5311,7 @@ async function handleAddProductStep(msg, userState) {
         }
         userState.productData.price = price;
         userState.step = 'awaiting_image';
-        adminBot.sendMessage(chatId, '✅ Цена сохранена.\n\nШаг 3/4: Введите URL изображения товара:');
+        adminBot.sendMessage(chatId, '✅ Цена сохранена.\n\nШаг 3/5: Введите URL изображения товара:');
         break;
         
       case 'awaiting_image':
@@ -5292,14 +5339,18 @@ async function handleAddProductStep(msg, userState) {
         };
         adminBot.sendMessage(
           chatId, 
-          `✅ URL изображения сохранен.\n\n🎮 Игра: ${gameName}\n📝 Название: ${userState.productData.name}\n💰 Цена: ${formatRub(userState.productData.price)}\n\nШаг 4/4: Это подарочный товар?`, 
+          `✅ URL изображения сохранен.\n\n🎮 Игра: ${gameName}\n📝 Название: ${userState.productData.name}\n💰 Цена: ${formatRub(userState.productData.price)}\n\nШаг 4/5: Это подарочный товар?`, 
           keyboard
         );
         break;
         
       case 'awaiting_gift':
         adminBot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора типа товара.');
-        return;
+        retutn;
+        
+      case 'awaiting_new':
+        adminBot.sendMessage(chatId, 'ℹ️ Пожалуйста, используйте кнопки выше для выбора метки NEW.');
+        retutn;
     }
     
     userStates[chatId] = userState;
@@ -8059,7 +8110,7 @@ app.get('/api/products', async (req, res) => {
   try {
     const { game } = req.query;
     
-    let query = 'SELECT * FROM products';
+    let query = 'SELECT id, name, price, image_url, is_gift, is_new FROM products';
     let params = [];
     
     if (game) {
