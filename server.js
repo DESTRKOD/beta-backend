@@ -4244,7 +4244,7 @@ adminBot.on('callback_query', async (cb) => {
   const userState = userStates[chatId];
 
   if (!userState || userState.step !== 'awaiting_gift') {
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново /add_product', show_alert: true });
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела', show_alert: true });
     return;
   }
 
@@ -4252,33 +4252,30 @@ adminBot.on('callback_query', async (cb) => {
   userState.productData.is_gift = is_gift;
   userState.step = 'awaiting_new';
 
-  // Удаляем старую клавиатуру (чтобы не висела кнопка подарка)
+  // Убираем старую клавиатуру
   await adminBot.editMessageReplyMarkup({
     chat_id: chatId,
     message_id: messageId,
     reply_markup: { inline_keyboard: [] }
-  }).catch(() => {}); // если не получилось — не страшно
+  }).catch(() => {});
 
-  // Отправляем НОВОЕ сообщение с вопросом "новый или нет"
-  const newMessage = await adminBot.sendMessage(chatId,
-    `✅ Подарок сохранён: ${is_gift ? 'Да' : 'Нет'}\n\n` +
-    `Теперь выберите, будет ли это новинка (с меткой 🆕 NEW):\n\n` +
+  // Отправляем новое сообщение с кнопками
+  await adminBot.sendMessage(chatId,
+    `✅ Подарок: ${is_gift ? 'Да' : 'Нет'}\n\n` +
+    `Шаг 5/5: Это новинка (с меткой 🆕)?\n\n` +
     `Название: ${userState.productData.name}\n` +
     `Цена: ${formatRub(userState.productData.price)}`,
     {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: '🆕 Да, это новинка', callback_data: 'set_new:1' },
+            { text: '🆕 Да, новый товар', callback_data: 'set_new:1' },
             { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
           ]
         ]
       }
     }
   );
-
-  // Запоминаем ID нового сообщения, если потом захочешь его редактировать
-  userState.messageId = newMessage.message_id;
 
   await adminBot.answerCallbackQuery(cb.id);
   return;
