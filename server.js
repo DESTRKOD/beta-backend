@@ -4242,50 +4242,45 @@ adminBot.on('callback_query', async (cb) => {
   if (data.startsWith('set_gift:')) {
   const isGift = data.split(':')[1];
   const userState = userStates[chatId];
-  
+
   if (!userState || userState.step !== 'awaiting_gift') {
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново командой /add_product', show_alert: true });
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново /add_product', show_alert: true });
     return;
   }
-  
-  try {
-    const is_gift = isGift === '1';
-    userState.productData.is_gift = is_gift;
-    userState.step = 'awaiting_new';
-    
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '🆕 Да, новый товар', callback_data: 'set_new:1' },
-          { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
+
+  const is_gift = isGift === '1';
+  userState.productData.is_gift = is_gift;
+  userState.step = 'awaiting_new';
+
+  // Удаляем старую клавиатуру (чтобы не висела кнопка подарка)
+  await adminBot.editMessageReplyMarkup({
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: [] }
+  }).catch(() => {}); // если не получилось — не страшно
+
+  // Отправляем НОВОЕ сообщение с вопросом "новый или нет"
+  const newMessage = await adminBot.sendMessage(chatId,
+    `✅ Подарок сохранён: ${is_gift ? 'Да' : 'Нет'}\n\n` +
+    `Теперь выберите, будет ли это новинка (с меткой 🆕 NEW):\n\n` +
+    `Название: ${userState.productData.name}\n` +
+    `Цена: ${formatRub(userState.productData.price)}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '🆕 Да, это новинка', callback_data: 'set_new:1' },
+            { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
+          ]
         ]
-      ]
-    };
-    
-    const messageText = `✅ Тип товара сохранен.\n\n📝 Название: ${userState.productData.name}\n💰 Цена: ${formatRub(userState.productData.price)}\n🎁 Подарок: ${is_gift ? 'Да' : 'Нет'}\n\nШаг 5/5: Отметить как "Новое"?`;
-    
-    await adminBot.editMessageText(messageText, {
-      chat_id: chatId,
-      message_id: messageId
-    });
-    
-    await adminBot.editMessageReplyMarkup({
-      chat_id: chatId,
-      message_id: messageId,
-      reply_markup: keyboard
-    });
-    
-    await adminBot.answerCallbackQuery(cb.id);
-    
-  } catch (error) {
-    console.error('❌ Ошибка:', error);
-    delete userStates[chatId];
-    await adminBot.editMessageText('❌ Ошибка. Попробуйте заново командой /add_product', {
-      chat_id: chatId,
-      message_id: messageId
-    });
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
-  }
+      }
+    }
+  );
+
+  // Запоминаем ID нового сообщения, если потом захочешь его редактировать
+  userState.messageId = newMessage.message_id;
+
+  await adminBot.answerCallbackQuery(cb.id);
   return;
 }
 
