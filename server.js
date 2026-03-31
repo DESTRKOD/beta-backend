@@ -8438,7 +8438,6 @@ app.post('/api/order/:orderId/refund', async (req, res) => {
   }
 });
 
-// ========= НОВЫЙ ЭНДПОИНТ ДЛЯ ПОДТВЕРЖДЕНИЯ ОПЛАТЫ =========
 app.post('/api/payment-confirmation', async (req, res) => {
     try {
         const { orderId, total, items, paymentMethod, methodName, timestamp } = req.body;
