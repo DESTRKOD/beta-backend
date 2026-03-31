@@ -2317,6 +2317,143 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   console.log('Callback получен:', data);
+  
+  adminBot.on('callback_query', async (cb) => {
+    const data = cb.data;
+    const chatId = cb.message.chat.id;
+    const messageId = cb.message.message_id;
+
+    if (cb.from.id !== ADMIN_ID) {
+        return adminBot.answerCallbackQuery(cb.id, { text: '⛔ Доступ запрещён', show_alert: true });
+    }
+
+    // ========= НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ПОДТВЕРЖДЕНИЯ ОПЛАТ =========
+    
+    // Обработка подтверждения оплаты (успешная оплата)
+    if (data.startsWith('confirm_payment_')) {
+        const orderId = data.replace('confirm_payment_', '');
+        
+        try {
+            // Обновляем статус заказа на "completed"
+            await pool.query(
+                `UPDATE orders SET status = 'completed', payment_status = 'confirmed' WHERE order_id = $1`,
+                [orderId]
+            );
+            
+            // Получаем TG пользователя для уведомления
+            const orderResult = await pool.query(
+                `SELECT o.email, u.tg_id FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id 
+                 WHERE o.order_id = $1`,
+                [orderId]
+            );
+            
+            const tgId = orderResult.rows[0]?.tg_id;
+            const email = orderResult.rows[0]?.email;
+            
+            // Уведомляем пользователя через Telegram, если есть
+            if (tgId) {
+                try {
+                    await userBot.sendMessage(
+                        tgId,
+                        `✅ *Ваш заказ #${orderId} успешно оплачен и подтвержден!*\n\n` +
+                        `Спасибо за покупку! 🦆\n\n` +
+                        `Если у вас есть вопросы, обратитесь в поддержку.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } catch (notifyError) {
+                    console.error('Ошибка уведомления пользователя:', notifyError);
+                }
+            }
+            
+            // Редактируем исходное сообщение админа
+            await adminBot.editMessageText(
+                `✅ *ПЛАТЕЖ ПОДТВЕРЖДЕН*\n\nЗаказ #${orderId} отмечен как успешно оплачен.\n\n📧 Email: ${email || 'не указан'}`,
+                {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            
+            await adminBot.answerCallbackQuery(cb.id, { text: '✅ Оплата подтверждена' });
+            
+        } catch (error) {
+            console.error('Ошибка подтверждения оплаты:', error);
+            await adminBot.editMessageText(
+                `❌ *ОШИБКА*\n\nНе удалось подтвердить оплату заказа #${orderId}.`,
+                {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+        }
+        return;
+    }
+    
+    // Обработка отклонения оплаты (нет денег)
+    if (data.startsWith('reject_payment_')) {
+        const orderId = data.replace('reject_payment_', '');
+        
+        try {
+            // Обновляем статус заказа на "payment_failed"
+            await pool.query(
+                `UPDATE orders SET status = 'payment_failed' WHERE order_id = $1`,
+                [orderId]
+            );
+            
+            // Получаем TG пользователя для уведомления
+            const orderResult = await pool.query(
+                `SELECT u.tg_id FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id 
+                 WHERE o.order_id = $1`,
+                [orderId]
+            );
+            
+            const tgId = orderResult.rows[0]?.tg_id;
+            
+            // Уведомляем пользователя
+            if (tgId) {
+                try {
+                    await userBot.sendMessage(
+                        tgId,
+                        `❌ *Ваш заказ #${orderId} не был подтвержден.*\n\n` +
+                        `Проверьте статус платежа и попробуйте снова.\n\n` +
+                        `Если вы уверены, что оплата прошла, обратитесь в поддержку.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } catch (notifyError) {
+                    console.error('Ошибка уведомления пользователя:', notifyError);
+                }
+            }
+            
+            // Редактируем исходное сообщение админа
+            await adminBot.editMessageText(
+                `❌ *ПЛАТЕЖ ОТКЛОНЕН*\n\nЗаказ #${orderId} отмечен как неудачный (нет денег).`,
+                {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            
+            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Оплата отклонена' });
+            
+        } catch (error) {
+            console.error('Ошибка отклонения оплаты:', error);
+            await adminBot.editMessageText(
+                `❌ *ОШИБКА*\n\nНе удалось отклонить оплату заказа #${orderId}.`,
+                {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    parse_mode: 'Markdown'
+                }
+            );
+            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+        }
+        
 
   if (data.startsWith('setlogo_prompt:')) {
     const gameId = data.split(':')[1];
@@ -8299,6 +8436,88 @@ app.post('/api/order/:orderId/refund', async (req, res) => {
     console.error('Ошибка оформления возврата:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
+});
+
+// ========= НОВЫЙ ЭНДПОИНТ ДЛЯ ПОДТВЕРЖДЕНИЯ ОПЛАТЫ =========
+app.post('/api/payment-confirmation', async (req, res) => {
+    try {
+        const { orderId, total, items, paymentMethod, methodName, timestamp } = req.body;
+        
+        if (!orderId || !total) {
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        
+        // Формируем читаемый состав заказа
+        let itemsList = '';
+        for (const [productId, quantity] of Object.entries(items)) {
+            try {
+                const productResult = await pool.query('SELECT name FROM products WHERE id = $1', [productId]);
+                const productName = productResult.rows[0]?.name || productId;
+                itemsList += `${productName} ×${quantity}\n`;
+            } catch (err) {
+                itemsList += `${productId} ×${quantity}\n`;
+            }
+        }
+        
+        // Форматируем дату
+        const paymentDate = new Date(timestamp).toLocaleString('ru-RU', {
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+        
+        // Получаем email пользователя, если есть
+        let userEmail = 'не указан';
+        let userTgId = null;
+        try {
+            const orderResult = await pool.query(
+                `SELECT o.email, u.tg_id FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id 
+                 WHERE o.order_id = $1`,
+                [orderId]
+            );
+            if (orderResult.rows.length > 0) {
+                userEmail = orderResult.rows[0].email || 'не указан';
+                userTgId = orderResult.rows[0].tg_id;
+            }
+        } catch (err) {}
+        
+        const message = `💳 *НОВОЕ УВЕДОМЛЕНИЕ ОБ ОПЛАТЕ*\n\n` +
+            `📦 Заказ: #${orderId}\n` +
+            `💰 Сумма: ${total?.toLocaleString() || 0} ₽\n` +
+            `🏦 Банк: ${methodName || paymentMethod || 'Не указан'}\n` +
+            `📧 Email: ${userEmail}\n` +
+            `🕒 Дата платежа: ${paymentDate}\n\n` +
+            `📋 Состав заказа:\n${itemsList || 'Не удалось получить состав'}\n\n` +
+            `➖➖➖➖➖➖➖➖➖➖➖\n` +
+            `✅ *Действия администратора:*`;
+        
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: '✅ УСПЕШНАЯ ОПЛАТА', callback_data: `confirm_payment_${orderId}` },
+                    { text: '❌ НЕТ ДЕНЕГ', callback_data: `reject_payment_${orderId}` }
+                ]
+            ]
+        };
+        
+        // Отправляем админу уведомление с кнопками
+        await adminBot.sendMessage(ADMIN_ID, message, { 
+            parse_mode: 'Markdown',
+            reply_markup: keyboard
+        });
+        
+        // Обновляем статус заказа в БД на "waiting_manual_check" (ожидает ручной проверки)
+        await pool.query(
+            `UPDATE orders SET status = 'waiting_manual_check' WHERE order_id = $1`,
+            [orderId]
+        );
+        
+        res.json({ success: true, message: 'Уведомление отправлено администратору' });
+        
+    } catch (error) {
+        console.error('Ошибка при отправке уведомления об оплате:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
 });
 
 app.get('/api/firebase-config', (req, res) => {
