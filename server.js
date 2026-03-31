@@ -2317,143 +2317,127 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   console.log('Callback получен:', data);
+
   
-  adminBot.on('callback_query', async (cb) => {
-    const data = cb.data;
-    const chatId = cb.message.chat.id;
-    const messageId = cb.message.message_id;
-
-    if (cb.from.id !== ADMIN_ID) {
-        return adminBot.answerCallbackQuery(cb.id, { text: '⛔ Доступ запрещён', show_alert: true });
-    }
-
-    // ========= НОВЫЕ ОБРАБОТЧИКИ ДЛЯ ПОДТВЕРЖДЕНИЯ ОПЛАТ =========
+  if (data.startsWith('confirm_payment_')) {
+    const orderId = data.replace('confirm_payment_', '');
     
-    // Обработка подтверждения оплаты (успешная оплата)
-    if (data.startsWith('confirm_payment_')) {
-        const orderId = data.replace('confirm_payment_', '');
-        
+    try {
+      await pool.query(
+        `UPDATE orders SET status = 'completed', payment_status = 'confirmed' WHERE order_id = $1`,
+        [orderId]
+      );
+      
+      const orderResult = await pool.query(
+        `SELECT o.email, u.tg_id FROM orders o 
+         LEFT JOIN users u ON o.user_id = u.id 
+         WHERE o.order_id = $1`,
+        [orderId]
+      );
+      
+      const tgId = orderResult.rows[0]?.tg_id;
+      const email = orderResult.rows[0]?.email;
+      
+      if (tgId) {
         try {
-            // Обновляем статус заказа на "completed"
-            await pool.query(
-                `UPDATE orders SET status = 'completed', payment_status = 'confirmed' WHERE order_id = $1`,
-                [orderId]
-            );
-            
-            // Получаем TG пользователя для уведомления
-            const orderResult = await pool.query(
-                `SELECT o.email, u.tg_id FROM orders o 
-                 LEFT JOIN users u ON o.user_id = u.id 
-                 WHERE o.order_id = $1`,
-                [orderId]
-            );
-            
-            const tgId = orderResult.rows[0]?.tg_id;
-            const email = orderResult.rows[0]?.email;
-            
-            // Уведомляем пользователя через Telegram, если есть
-            if (tgId) {
-                try {
-                    await userBot.sendMessage(
-                        tgId,
-                        `✅ *Ваш заказ #${orderId} успешно оплачен и подтвержден!*\n\n` +
-                        `Спасибо за покупку! 🦆\n\n` +
-                        `Если у вас есть вопросы, обратитесь в поддержку.`,
-                        { parse_mode: 'Markdown' }
-                    );
-                } catch (notifyError) {
-                    console.error('Ошибка уведомления пользователя:', notifyError);
-                }
-            }
-            
-            // Редактируем исходное сообщение админа
-            await adminBot.editMessageText(
-                `✅ *ПЛАТЕЖ ПОДТВЕРЖДЕН*\n\nЗаказ #${orderId} отмечен как успешно оплачен.\n\n📧 Email: ${email || 'не указан'}`,
-                {
-                    chat_id: chatId,
-                    message_id: messageId,
-                    parse_mode: 'Markdown'
-                }
-            );
-            
-            await adminBot.answerCallbackQuery(cb.id, { text: '✅ Оплата подтверждена' });
-            
-        } catch (error) {
-            console.error('Ошибка подтверждения оплаты:', error);
-            await adminBot.editMessageText(
-                `❌ *ОШИБКА*\n\nНе удалось подтвердить оплату заказа #${orderId}.`,
-                {
-                    chat_id: chatId,
-                    message_id: messageId,
-                    parse_mode: 'Markdown'
-                }
-            );
-            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+          await userBot.sendMessage(
+            tgId,
+            `✅ *Ваш заказ #${orderId} успешно оплачен и подтвержден!*\n\n` +
+            `Спасибо за покупку! 🦆\n\n` +
+            `Если у вас есть вопросы, обратитесь в поддержку.`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch (notifyError) {
+          console.error('Ошибка уведомления пользователя:', notifyError);
         }
-        return;
+      }
+      
+      await adminBot.editMessageText(
+        `✅ *ПЛАТЕЖ ПОДТВЕРЖДЕН*\n\nЗаказ #${orderId} отмечен как успешно оплачен.\n\n📧 Email: ${email || 'не указан'}`,
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown'
+        }
+      );
+      
+      await adminBot.answerCallbackQuery(cb.id, { text: '✅ Оплата подтверждена' });
+      
+    } catch (error) {
+      console.error('Ошибка подтверждения оплаты:', error);
+      await adminBot.editMessageText(
+        `❌ *ОШИБКА*\n\nНе удалось подтвердить оплату заказа #${orderId}.`,
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown'
+        }
+      );
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
     }
+    return;
+  }
+  
+  // Обработка отклонения оплаты (нет денег)
+  if (data.startsWith('reject_payment_')) {
+    const orderId = data.replace('reject_payment_', '');
     
-    // Обработка отклонения оплаты (нет денег)
-    if (data.startsWith('reject_payment_')) {
-        const orderId = data.replace('reject_payment_', '');
-        
+    try {
+      await pool.query(
+        `UPDATE orders SET status = 'payment_failed' WHERE order_id = $1`,
+        [orderId]
+      );
+      
+      const orderResult = await pool.query(
+        `SELECT u.tg_id FROM orders o 
+         LEFT JOIN users u ON o.user_id = u.id 
+         WHERE o.order_id = $1`,
+        [orderId]
+      );
+      
+      const tgId = orderResult.rows[0]?.tg_id;
+      
+      if (tgId) {
         try {
-            // Обновляем статус заказа на "payment_failed"
-            await pool.query(
-                `UPDATE orders SET status = 'payment_failed' WHERE order_id = $1`,
-                [orderId]
-            );
-            
-            // Получаем TG пользователя для уведомления
-            const orderResult = await pool.query(
-                `SELECT u.tg_id FROM orders o 
-                 LEFT JOIN users u ON o.user_id = u.id 
-                 WHERE o.order_id = $1`,
-                [orderId]
-            );
-            
-            const tgId = orderResult.rows[0]?.tg_id;
-            
-            // Уведомляем пользователя
-            if (tgId) {
-                try {
-                    await userBot.sendMessage(
-                        tgId,
-                        `❌ *Ваш заказ #${orderId} не был подтвержден.*\n\n` +
-                        `Проверьте статус платежа и попробуйте снова.\n\n` +
-                        `Если вы уверены, что оплата прошла, обратитесь в поддержку.`,
-                        { parse_mode: 'Markdown' }
-                    );
-                } catch (notifyError) {
-                    console.error('Ошибка уведомления пользователя:', notifyError);
-                }
-            }
-            
-            // Редактируем исходное сообщение админа
-            await adminBot.editMessageText(
-                `❌ *ПЛАТЕЖ ОТКЛОНЕН*\n\nЗаказ #${orderId} отмечен как неудачный (нет денег).`,
-                {
-                    chat_id: chatId,
-                    message_id: messageId,
-                    parse_mode: 'Markdown'
-                }
-            );
-            
-            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Оплата отклонена' });
-            
-        } catch (error) {
-            console.error('Ошибка отклонения оплаты:', error);
-            await adminBot.editMessageText(
-                `❌ *ОШИБКА*\n\nНе удалось отклонить оплату заказа #${orderId}.`,
-                {
-                    chat_id: chatId,
-                    message_id: messageId,
-                    parse_mode: 'Markdown'
-                }
-            );
-            await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+          await userBot.sendMessage(
+            tgId,
+            `❌ *Ваш заказ #${orderId} не был подтвержден.*\n\n` +
+            `Проверьте статус платежа и попробуйте снова.\n\n` +
+            `Если вы уверены, что оплата прошла, обратитесь в поддержку.`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch (notifyError) {
+          console.error('Ошибка уведомления пользователя:', notifyError);
         }
-        
+      }
+      
+      await adminBot.editMessageText(
+        `❌ *ПЛАТЕЖ ОТКЛОНЕН*\n\nЗаказ #${orderId} отмечен как неудачный (нет денег).`,
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown'
+        }
+      );
+      
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Оплата отклонена' });
+      
+    } catch (error) {
+      console.error('Ошибка отклонения оплаты:', error);
+      await adminBot.editMessageText(
+        `❌ *ОШИБКА*\n\nНе удалось отклонить оплату заказа #${orderId}.`,
+        {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: 'Markdown'
+        }
+      );
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Ошибка', show_alert: true });
+    }
+    return;
+  }
+  
+  
 
   if (data.startsWith('setlogo_prompt:')) {
     const gameId = data.split(':')[1];
