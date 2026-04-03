@@ -14,6 +14,9 @@ const multer = require('multer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const SELF_SHOP_ID = process.env.SELF_SHOP_ID;
+const SELF_SECRET_KEY = process.env.SELF_SECRET_KEY;
+const SELF_PAYMENT_URL = process.env.SELF_PAYMENT_URL;
 const BILEE_API_URL = 'https://paymentgate.bilee.ru/api';
 const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
@@ -49,6 +52,14 @@ let maintenanceMode = {
   duration: 0,
   startedAt: null
 };
+
+function generateSelfSignature(params, secretKey) {
+    const sortedKeys = Object.keys(params).sort();
+    const signString = sortedKeys.map(key => params[key]).join('');
+    const hash = crypto.createHash('md5');
+    hash.update(signString + secretKey, 'utf8');
+    return hash.digest('hex');
+}
 
 function isMaintenanceActive() {
   return maintenanceMode.active;
@@ -8002,6 +8013,49 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
+// Self.PayAnyWay - создание платежа (редирект на форму)
+app.post('/api/self-pay/create', async (req, res) => {
+    try {
+        const { orderId, amount, description, successUrl, failUrl } = req.body;
+
+        if (!orderId || !amount) {
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+
+        if (amount < 10 || amount > 10000) {
+            return res.status(400).json({ success: false, error: 'Amount must be between 10 and 10000 RUB' });
+        }
+
+        const paymentParams = {
+            shop_id: SELF_SHOP_ID,
+            sum: amount,
+            currency: 'RUB',
+            order_id: orderId,
+            description: description || `Оплата заказа #${orderId} в Duck Shop`,
+            success_url: successUrl || `${SITE_URL}/success?order=${orderId}`,
+            fail_url: failUrl || `${SITE_URL}/badPay?order=${orderId}`,
+            callback_url: `${SERVER_URL}/api/self-pay/callback`
+        };
+
+        // Генерируем подпись
+        paymentParams.signature = generateSelfSignature(paymentParams, SELF_SECRET_KEY);
+
+        console.log('📤 Self.PayAnyWay params:', paymentParams);
+
+        // Формируем URL для редиректа
+        const formUrl = `${SELF_PAYMENT_URL}?${new URLSearchParams(paymentParams).toString()}`;
+
+        res.json({
+            success: true,
+            paymentUrl: formUrl
+        });
+
+    } catch (error) {
+        console.error('❌ Self.PayAnyWay ошибка:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 app.post('/api/save-email', async (req, res) => {
   try {
     const { orderId, email } = req.body;
@@ -8137,6 +8191,56 @@ app.post('/api/bilee-webhook', async (req, res) => {
     console.error('Ошибка обработки вебхука:', error);
     res.status(500).send('Internal server error');
   }
+});
+
+// Self.PayAnyWay - callback для уведомлений
+app.post('/api/self-pay/callback', async (req, res) => {
+    try {
+        const callbackData = req.body;
+        console.log('📥 Self.PayAnyWay callback:', callbackData);
+
+        const { order_id, payment_id, status, signature } = callbackData;
+
+        if (!order_id) {
+            return res.status(200).send('OK');
+        }
+
+        // Проверяем подпись
+        const expectedSignature = generateSelfSignature(
+            { order_id, payment_id, status }, 
+            SELF_SECRET_KEY
+        );
+
+        if (expectedSignature !== signature) {
+            console.error('❌ Invalid signature');
+            return res.status(400).send('Invalid signature');
+        }
+
+        if (status === 'success') {
+            await pool.query(
+                `UPDATE orders SET payment_status = 'confirmed', status = 'waiting' WHERE order_id = $1`,
+                [order_id]
+            );
+
+            const orderResult = await pool.query(
+                `SELECT total, email FROM orders WHERE order_id = $1`,
+                [order_id]
+            );
+
+            if (orderResult.rows.length > 0) {
+                const order = orderResult.rows[0];
+                await adminBot.sendMessage(
+                    ADMIN_ID,
+                    `✅ *Оплата через Self.PayAnyWay*\n\n📦 Заказ: #${order_id}\n💰 Сумма: ${formatRub(order.total)}\n📧 Email: ${order.email || 'не указан'}`
+                );
+            }
+        }
+
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('❌ Callback error:', error);
+        res.status(500).send('Internal server error');
+    }
 });
 
 app.get('/api/order-status/:orderId', async (req, res) => {
