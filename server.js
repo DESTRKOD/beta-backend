@@ -697,6 +697,19 @@ async function initDB() {
     console.log('✅ Таблица wallets создана');
 
     await pool.query(`
+  CREATE TABLE IF NOT EXISTS banners (
+    id SERIAL PRIMARY KEY,
+    image_url TEXT NOT NULL,
+    link_url TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    order_index INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+console.log('✅ Таблица banners создана');
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS games (
         id VARCHAR(50) PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
@@ -846,6 +859,48 @@ app.get('/api/maintenance-status', (req, res) => {
 
 app.get('/ping', (req, res) => {
   res.send('pong');
+});
+
+app.get('/api/banners', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, image_url, link_url FROM banners WHERE is_active = true ORDER BY order_index ASC, id ASC'
+    );
+    res.json({ success: true, banners: result.rows });
+  } catch (error) {
+    console.error('Ошибка получения баннеров:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// ДОБАВИТЬ БАННЕР (админ)
+app.post('/api/admin/banners', async (req, res) => {
+  try {
+    const { image_url, link_url } = req.body;
+    if (!image_url) {
+      return res.status(400).json({ success: false, error: 'image_url required' });
+    }
+    const result = await pool.query(
+      'INSERT INTO banners (image_url, link_url) VALUES ($1, $2) RETURNING id',
+      [image_url, link_url || null]
+    );
+    res.json({ success: true, bannerId: result.rows[0].id });
+  } catch (error) {
+    console.error('Ошибка добавления баннера:', error);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// УДАЛИТЬ БАННЕР (админ)
+app.delete('/api/admin/banners/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM banners WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка удаления баннера:', error);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
 });
 
 app.get('/status', (req, res) => {
@@ -1326,6 +1381,57 @@ adminBot.onText(/\/logos/, async (msg) => {
   } catch (error) {
     console.error('❌ Ошибка получения логотипов:', error);
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении логотипов');
+  }
+});
+
+
+// ДОБАВИТЬ БАННЕР
+adminBot.onText(/\/addbanner/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  userStates[chatId] = { action: 'add_banner', step: 'awaiting_image' };
+  adminBot.sendMessage(chatId, '🖼️ Отправьте ссылку на изображение баннера (URL):');
+});
+
+// УДАЛИТЬ БАННЕР (показать список)
+adminBot.onText(/\/delbanner/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  try {
+    const res = await pool.query('SELECT id, image_url FROM banners ORDER BY order_index, id');
+    if (res.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет баннеров для удаления.');
+    }
+    const keyboard = {
+      inline_keyboard: res.rows.map(b => [
+        { text: `🗑️ Баннер #${b.id}`, callback_data: `del_banner:${b.id}` }
+      ])
+    };
+    adminBot.sendMessage(chatId, 'Выберите баннер для удаления:', { reply_markup: keyboard });
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка загрузки баннеров');
+  }
+});
+
+// СПИСОК БАННЕРОВ
+adminBot.onText(/\/banners/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  try {
+    const res = await pool.query('SELECT id, image_url, link_url, is_active FROM banners ORDER BY order_index');
+    if (res.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет баннеров');
+    }
+    let text = '📸 *Список баннеров*\n\n';
+    res.rows.forEach(b => {
+      text += `ID: ${b.id}\n`;
+      text += `🖼️ ${b.image_url.substring(0, 50)}...\n`;
+      text += `🔗 ${b.link_url || 'нет ссылки'}\n`;
+      text += `🟢 ${b.is_active ? 'активен' : 'неактивен'}\n\n`;
+    });
+    adminBot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка');
   }
 });
 
@@ -2448,7 +2554,20 @@ adminBot.on('callback_query', async (cb) => {
     return;
   }
   
-  
+  if (data.startsWith('del_banner:')) {
+  const bannerId = data.split(':')[1];
+  try {
+    await pool.query('DELETE FROM banners WHERE id = $1', [bannerId]);
+    await adminBot.editMessageText(`✅ Баннер #${bannerId} удалён`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
+    await adminBot.answerCallbackQuery(cb.id, { text: 'Удалено' });
+  } catch (err) {
+    await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка', show_alert: true });
+  }
+  return;
+}
 
   if (data.startsWith('setlogo_prompt:')) {
     const gameId = data.split(':')[1];
@@ -4543,6 +4662,42 @@ adminBot.on('message', async (msg) => {
     }
     return;
   }
+
+  if (userState && userState.action === 'add_banner') {
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  if (userState.step === 'awaiting_image') {
+    if (!text.startsWith('http://') && !text.startsWith('https://')) {
+      return adminBot.sendMessage(chatId, '❌ Введите корректный URL (http:// или https://)');
+    }
+    userState.image_url = text;
+    userState.step = 'awaiting_link';
+    return adminBot.sendMessage(chatId, '🔗 Хотите добавить кнопку-ссылку на баннер?\nОтправьте URL (или "нет", если не нужно):');
+  }
+
+  if (userState.step === 'awaiting_link') {
+    let link_url = null;
+    if (text.toLowerCase() !== 'нет') {
+      if (!text.startsWith('http://') && !text.startsWith('https://')) {
+        return adminBot.sendMessage(chatId, '❌ Введите корректный URL (или "нет")');
+      }
+      link_url = text;
+    }
+    try {
+      await pool.query(
+        'INSERT INTO banners (image_url, link_url) VALUES ($1, $2)',
+        [userState.image_url, link_url]
+      );
+      adminBot.sendMessage(chatId, '✅ Баннер успешно добавлен!');
+    } catch (err) {
+      console.error(err);
+      adminBot.sendMessage(chatId, '❌ Ошибка при сохранении баннера');
+    }
+    delete userStates[chatId];
+    return;
+  }
+}
 
   if (!userState) return;
   
