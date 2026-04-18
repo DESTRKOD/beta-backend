@@ -696,10 +696,19 @@ async function initDB() {
     `);
     console.log('✅ Таблица wallets создана');
 
-    await pool.query(`
-  CREATE TABLE IF NOT EXISTS banners (
+    // Удаляем старую таблицу если она существует (для перехода на новый формат)
+await pool.query(`
+  DROP TABLE IF EXISTS banners CASCADE
+`);
+console.log('✅ Старая таблица banners удалена');
+
+// Создаём новую таблицу с поддержкой 3 форматов
+await pool.query(`
+  CREATE TABLE banners (
     id SERIAL PRIMARY KEY,
-    image_url TEXT NOT NULL,
+    mobile_url TEXT NOT NULL,
+    tablet_url TEXT NOT NULL,
+    desktop_url TEXT NOT NULL,
     link_url TEXT,
     is_active BOOLEAN DEFAULT TRUE,
     order_index INTEGER DEFAULT 0,
@@ -707,7 +716,7 @@ async function initDB() {
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
 `);
-console.log('✅ Таблица banners создана');
+console.log('✅ Новая таблица banners создана (mobile/tablet/desktop)');
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS games (
@@ -864,7 +873,7 @@ app.get('/ping', (req, res) => {
 app.get('/api/banners', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, image_url, link_url FROM banners WHERE is_active = true ORDER BY order_index ASC, id ASC'
+      'SELECT id, mobile_url, tablet_url, desktop_url, link_url FROM banners WHERE is_active = true ORDER BY order_index ASC, id ASC'
     );
     res.json({ success: true, banners: result.rows });
   } catch (error) {
@@ -873,17 +882,23 @@ app.get('/api/banners', async (req, res) => {
   }
 });
 
-// ДОБАВИТЬ БАННЕР (админ)
 app.post('/api/admin/banners', async (req, res) => {
   try {
-    const { image_url, link_url } = req.body;
-    if (!image_url) {
-      return res.status(400).json({ success: false, error: 'image_url required' });
+    const { mobile_url, tablet_url, desktop_url, link_url } = req.body;
+    
+    if (!mobile_url || !tablet_url || !desktop_url) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'mobile_url, tablet_url and desktop_url are required' 
+      });
     }
+    
     const result = await pool.query(
-      'INSERT INTO banners (image_url, link_url) VALUES ($1, $2) RETURNING id',
-      [image_url, link_url || null]
+      `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [mobile_url, tablet_url, desktop_url, link_url || null]
     );
+    
     res.json({ success: true, bannerId: result.rows[0].id });
   } catch (error) {
     console.error('Ошибка добавления баннера:', error);
@@ -935,6 +950,69 @@ function startKeepAlive() {
   keepAliveInterval = setInterval(pingSelf, interval);
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
+}
+
+// Функция получения правильного URL в зависимости от ширины экрана
+function getResponsiveBannerUrl(banner) {
+    const width = window.innerWidth;
+    
+    if (width <= 480) {
+        return banner.mobile_url;      // 600×250px
+    } else if (width <= 768) {
+        return banner.tablet_url;      // 800×300px
+    } else {
+        return banner.desktop_url;     // 1200×400px
+    }
+}
+
+// Обновлённая функция рендера карусели
+function renderBannerCarousel() {
+    const carousel = document.getElementById('bannerCarousel');
+    const track = document.getElementById('carouselTrack');
+    const dotsContainer = document.getElementById('carouselDots');
+    if (!carousel || !track || !dotsContainer) return;
+
+    if (!banners.length) {
+        carousel.style.display = 'none';
+        if (autoSlideInterval) clearInterval(autoSlideInterval);
+        return;
+    }
+
+    carousel.style.display = 'block';
+    
+    // Для каждого баннера выбираем правильный URL под текущее разрешение
+    track.innerHTML = banners.map(banner => {
+        const imgUrl = getResponsiveBannerUrl(banner);
+        return `
+            <div class="carousel-slide" data-link="${banner.link_url || ''}">
+                <img src="${imgUrl}" alt="Рекламный баннер" loading="lazy">
+            </div>
+        `;
+    }).join('');
+
+    dotsContainer.innerHTML = banners.map((_, idx) => `
+        <div class="dot ${idx === currentBannerIndex ? 'active' : ''}" data-index="${idx}"></div>
+    `).join('');
+
+    updateCarouselPosition();
+
+    // Обработчики кликов
+    document.querySelectorAll('.carousel-slide').forEach((slide, idx) => {
+        slide.addEventListener('click', () => {
+            const link = banners[idx]?.link_url;
+            if (link) window.open(link, '_blank');
+        });
+    });
+
+    document.querySelectorAll('.dot').forEach(dot => {
+        dot.addEventListener('click', (e) => {
+            const idx = parseInt(dot.dataset.index);
+            if (!isNaN(idx)) goToBanner(idx);
+        });
+    });
+
+    if (autoSlideInterval) clearInterval(autoSlideInterval);
+    autoSlideInterval = setInterval(() => nextBanner(), 5000);
 }
 
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
@@ -1385,12 +1463,59 @@ adminBot.onText(/\/logos/, async (msg) => {
 });
 
 
-// ДОБАВИТЬ БАННЕР
+// ДОБАВИТЬ БАННЕР (мультиформатный)
 adminBot.onText(/\/addbanner/, async (msg) => {
   if (!isAdmin(msg)) return;
   const chatId = msg.chat.id;
-  userStates[chatId] = { action: 'add_banner', step: 'awaiting_image' };
-  adminBot.sendMessage(chatId, '🖼️ Отправьте ссылку на изображение баннера (URL):');
+  
+  userStates[chatId] = { 
+    action: 'add_banner', 
+    step: 'awaiting_mobile',
+    bannerData: {}
+  };
+  
+  adminBot.sendMessage(
+    chatId,
+    '📱 *ШАГ 1/4: Баннер для телефона*\n\n' +
+    'Размер: *600×250px* (соотношение 2.4:1)\n\n' +
+    'Отправьте ссылку на изображение:',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+adminBot.onText(/\/previewbanners/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, mobile_url, tablet_url, desktop_url FROM banners WHERE is_active = true ORDER BY id'
+    );
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет активных баннеров');
+    }
+    
+    for (const banner of result.rows) {
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '📱 Моб', callback_data: `preview_banner:mobile:${banner.mobile_url}` },
+            { text: '📱 Планшет', callback_data: `preview_banner:tablet:${banner.tablet_url}` },
+            { text: '💻 Декс', callback_data: `preview_banner:desktop:${banner.desktop_url}` }
+          ]
+        ]
+      };
+      
+      await adminBot.sendMessage(
+        chatId,
+        `🖼️ *Баннер #${banner.id}*\n\n📱 600×250 | 📱 800×300 | 💻 1200×400`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
+      );
+    }
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка');
+  }
 });
 
 // УДАЛИТЬ БАННЕР (показать список)
@@ -2494,6 +2619,26 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
+
+
+  if (data.startsWith('preview_banner:')) {
+  const parts = data.split(':');
+  const type = parts[1]; // mobile, tablet, desktop
+  const url = parts.slice(2).join(':');
+  
+  let caption = '';
+  if (type === 'mobile') caption = '📱 Мобильный баннер (600×250px)';
+  else if (type === 'tablet') caption = '📱 Планшетный баннер (800×300px)';
+  else caption = '💻 Десктопный баннер (1200×400px)';
+  
+  try {
+    await adminBot.sendPhoto(chatId, url, { caption });
+    await adminBot.answerCallbackQuery(cb.id);
+  } catch (err) {
+    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Не удалось загрузить', show_alert: true });
+  }
+  return;
+}
   
   // Обработка отклонения оплаты (нет денег)
   if (data.startsWith('reject_payment_')) {
@@ -4667,15 +4812,55 @@ adminBot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
 
-  if (userState.step === 'awaiting_image') {
+  // ШАГ 1: Мобильный баннер (600×250)
+  if (userState.step === 'awaiting_mobile') {
     if (!text.startsWith('http://') && !text.startsWith('https://')) {
       return adminBot.sendMessage(chatId, '❌ Введите корректный URL (http:// или https://)');
     }
-    userState.image_url = text;
-    userState.step = 'awaiting_link';
-    return adminBot.sendMessage(chatId, '🔗 Хотите добавить кнопку-ссылку на баннер?\nОтправьте URL (или "нет", если не нужно):');
+    userState.bannerData.mobile_url = text;
+    userState.step = 'awaiting_tablet';
+    return adminBot.sendMessage(
+      chatId,
+      '📱 *ШАГ 2/4: Баннер для планшета*\n\n' +
+      'Размер: *800×300px* (соотношение 2.66:1)\n\n' +
+      'Отправьте ссылку на изображение:',
+      { parse_mode: 'Markdown' }
+    );
   }
 
+  // ШАГ 2: Планшетный баннер (800×300)
+  if (userState.step === 'awaiting_tablet') {
+    if (!text.startsWith('http://') && !text.startsWith('https://')) {
+      return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
+    }
+    userState.bannerData.tablet_url = text;
+    userState.step = 'awaiting_desktop';
+    return adminBot.sendMessage(
+      chatId,
+      '💻 *ШАГ 3/4: Баннер для компьютера*\n\n' +
+      'Размер: *1200×400px* (соотношение 3:1)\n\n' +
+      'Отправьте ссылку на изображение:',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  // ШАГ 3: Десктопный баннер (1200×400)
+  if (userState.step === 'awaiting_desktop') {
+    if (!text.startsWith('http://') && !text.startsWith('https://')) {
+      return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
+    }
+    userState.bannerData.desktop_url = text;
+    userState.step = 'awaiting_link';
+    return adminBot.sendMessage(
+      chatId,
+      '🔗 *ШАГ 4/4: Ссылка на баннере*\n\n' +
+      'Введите URL, куда перейдёт пользователь при клике.\n' +
+      'Или отправьте "нет", если ссылка не нужна:',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  // ШАГ 4: Ссылка (опционально)
   if (userState.step === 'awaiting_link') {
     let link_url = null;
     if (text.toLowerCase() !== 'нет') {
@@ -4684,12 +4869,33 @@ adminBot.on('message', async (msg) => {
       }
       link_url = text;
     }
+    
     try {
       await pool.query(
-        'INSERT INTO banners (image_url, link_url) VALUES ($1, $2)',
-        [userState.image_url, link_url]
+        `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
+         VALUES ($1, $2, $3, $4)`,
+        [userState.bannerData.mobile_url, userState.bannerData.tablet_url, userState.bannerData.desktop_url, link_url]
       );
-      adminBot.sendMessage(chatId, '✅ Баннер успешно добавлен!');
+      
+      const previewKeyboard = {
+        inline_keyboard: [
+          [
+            { text: '📱 Мобильный', callback_data: `preview_banner:mobile:${userState.bannerData.mobile_url}` },
+            { text: '📱 Планшет', callback_data: `preview_banner:tablet:${userState.bannerData.tablet_url}` },
+            { text: '💻 Десктоп', callback_data: `preview_banner:desktop:${userState.bannerData.desktop_url}` }
+          ]
+        ]
+      };
+      
+      await adminBot.sendMessage(
+        chatId,
+        '✅ *Баннер успешно добавлен!*\n\n' +
+        '📱 Мобильный: 600×250px\n' +
+        '📱 Планшет: 800×300px\n' +
+        '💻 Десктоп: 1200×400px\n' +
+        (link_url ? `🔗 Ссылка: ${link_url}` : '🔗 Без ссылки'),
+        { parse_mode: 'Markdown', reply_markup: previewKeyboard }
+      );
     } catch (err) {
       console.error(err);
       adminBot.sendMessage(chatId, '❌ Ошибка при сохранении баннера');
@@ -4698,7 +4904,6 @@ adminBot.on('message', async (msg) => {
     return;
   }
 }
-
   if (!userState) return;
   
   console.log('📨 Получено сообщение от админа в состоянии:', userState);
