@@ -84,15 +84,6 @@ function getHoursWord(hours) {
 }
 
 app.use((req, res, next) => {
-  console.log("═".repeat(70));
-  console.log("[DEBUG MAINTENANCE] Запрос:", req.method, req.originalUrl);
-  console.log("  → path:", req.path);
-  console.log("  → query:", req.query);
-  console.log("  → сессия на входе:", req.session ? JSON.stringify(req.session, null, 2) : "нет сессии");
-  console.log("  → техперерыв активен?", maintenanceMode?.active ?? "не определено");
-  console.log("  → ADMIN_BYPASS_KEY существует?", !!process.env.ADMIN_BYPASS_KEY);
-  console.log("═".repeat(70));
-
   const allowedPaths = [
     '/working',
     '/working.html',
@@ -110,29 +101,17 @@ app.use((req, res, next) => {
   const isValidAdminBypass = adminBypass && adminBypass === process.env.ADMIN_BYPASS_KEY;
 
   if (isValidAdminBypass) {
-    console.log("→ Admin BYPASS активирован!");
     req.session.isAdmin = true;
-
     return req.session.save((err) => {
-      if (err) {
-        console.error("❌ Ошибка сохранения сессии при bypass:", err);
-      } else {
-        console.log("→ Сессия успешно сохранена (bypass)");
-      }
-
       if (Object.keys(req.query).length > 0 && !req.path.startsWith('/api/')) {
-        console.log("→ Редирект на чистый URL (не API)");
         return res.redirect(302, req.path);
       }
-
       return next();
     });
   }
 
   if (req.session?.isAdmin === true) {
-    console.log("→ Админ через сессию → полный доступ");
     if (Object.keys(req.query).length > 0) {
-      console.log("→ Чистим query для админа");
       return res.redirect(302, req.path);
     }
     return next();
@@ -141,22 +120,17 @@ app.use((req, res, next) => {
   const isMaintenance = maintenanceMode?.active === true;
 
   if (!isMaintenance) {
-    console.log("→ Техперерыв выключен → всех пускаем");
     if (Object.keys(req.query).length > 0) {
       return res.redirect(302, req.path);
     }
     return next();
   }
 
-  console.log("→ Техперерыв АКТИВЕН");
-
   if (allowedPaths.includes(normalizedPath) || allowedPaths.includes(req.path)) {
-    console.log(`→ Разрешённый путь: ${req.path}`);
     return next();
   }
 
   if (req.path.startsWith('/api/') && req.path !== '/api/maintenance-status') {
-    console.log(`→ API заблокирован: ${req.path}`);
     return res.status(503).json({
       success: false,
       error: 'maintenance',
@@ -164,7 +138,6 @@ app.use((req, res, next) => {
     });
   }
 
-  console.log(`→ Редирект на /working с пути: ${req.path}`);
   return res.redirect('/working');
 });
 
@@ -674,10 +647,6 @@ async function initDB() {
     console.log('✅ Таблица orders создана');
 
     await pool.query(`
-      ALTER TABLE games ADD COLUMN IF NOT EXISTS banner_url TEXT
-    `);
-
-    await pool.query(`
       ALTER TABLE products 
       ADD COLUMN IF NOT EXISTS is_new BOOLEAN DEFAULT FALSE
     `);
@@ -695,28 +664,6 @@ async function initDB() {
       )
     `);
     console.log('✅ Таблица wallets создана');
-
-    // Удаляем старую таблицу если она существует (для перехода на новый формат)
-await pool.query(`
-  DROP TABLE IF EXISTS banners CASCADE
-`);
-console.log('✅ Старая таблица banners удалена');
-
-// Создаём новую таблицу с поддержкой 3 форматов
-await pool.query(`
-  CREATE TABLE banners (
-    id SERIAL PRIMARY KEY,
-    mobile_url TEXT NOT NULL,
-    tablet_url TEXT NOT NULL,
-    desktop_url TEXT NOT NULL,
-    link_url TEXT,
-    is_active BOOLEAN DEFAULT TRUE,
-    order_index INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-console.log('✅ Новая таблица banners создана (mobile/tablet/desktop)');
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS games (
@@ -812,6 +759,25 @@ console.log('✅ Новая таблица banners создана (mobile/tablet
     `);
     console.log('✅ Таблица support_messages создана');
 
+    // Новая таблица banners (рекламные баннеры)
+    await pool.query(`
+      DROP TABLE IF EXISTS banners CASCADE
+    `);
+    await pool.query(`
+      CREATE TABLE banners (
+        id SERIAL PRIMARY KEY,
+        mobile_url TEXT NOT NULL,
+        tablet_url TEXT NOT NULL,
+        desktop_url TEXT NOT NULL,
+        link_url TEXT,
+        is_active BOOLEAN DEFAULT TRUE,
+        order_index INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Таблица banners создана (мобильный/планшет/десктоп)');
+
     const tableCheck = await pool.query(`
       SELECT column_name, data_type, is_nullable 
       FROM information_schema.columns 
@@ -870,54 +836,6 @@ app.get('/ping', (req, res) => {
   res.send('pong');
 });
 
-app.get('/api/banners', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT id, mobile_url, tablet_url, desktop_url, link_url FROM banners WHERE is_active = true ORDER BY order_index ASC, id ASC'
-    );
-    res.json({ success: true, banners: result.rows });
-  } catch (error) {
-    console.error('Ошибка получения баннеров:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
-
-app.post('/api/admin/banners', async (req, res) => {
-  try {
-    const { mobile_url, tablet_url, desktop_url, link_url } = req.body;
-    
-    if (!mobile_url || !tablet_url || !desktop_url) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'mobile_url, tablet_url and desktop_url are required' 
-      });
-    }
-    
-    const result = await pool.query(
-      `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [mobile_url, tablet_url, desktop_url, link_url || null]
-    );
-    
-    res.json({ success: true, bannerId: result.rows[0].id });
-  } catch (error) {
-    console.error('Ошибка добавления баннера:', error);
-    res.status(500).json({ success: false, error: 'Internal error' });
-  }
-});
-
-// УДАЛИТЬ БАННЕР (админ)
-app.delete('/api/admin/banners/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query('DELETE FROM banners WHERE id = $1', [id]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Ошибка удаления баннера:', error);
-    res.status(500).json({ success: false, error: 'Internal error' });
-  }
-});
-
 app.get('/status', (req, res) => {
   res.json({
     alive: true,
@@ -950,69 +868,6 @@ function startKeepAlive() {
   keepAliveInterval = setInterval(pingSelf, interval);
   setTimeout(pingSelf, 3000);
   console.log(`🔄 Keep-alive system started (every ${Math.round(interval/60000)} minutes)`);
-}
-
-// Функция получения правильного URL в зависимости от ширины экрана
-function getResponsiveBannerUrl(banner) {
-    const width = window.innerWidth;
-    
-    if (width <= 480) {
-        return banner.mobile_url;      // 600×250px
-    } else if (width <= 768) {
-        return banner.tablet_url;      // 800×300px
-    } else {
-        return banner.desktop_url;     // 1200×400px
-    }
-}
-
-// Обновлённая функция рендера карусели
-function renderBannerCarousel() {
-    const carousel = document.getElementById('bannerCarousel');
-    const track = document.getElementById('carouselTrack');
-    const dotsContainer = document.getElementById('carouselDots');
-    if (!carousel || !track || !dotsContainer) return;
-
-    if (!banners.length) {
-        carousel.style.display = 'none';
-        if (autoSlideInterval) clearInterval(autoSlideInterval);
-        return;
-    }
-
-    carousel.style.display = 'block';
-    
-    // Для каждого баннера выбираем правильный URL под текущее разрешение
-    track.innerHTML = banners.map(banner => {
-        const imgUrl = getResponsiveBannerUrl(banner);
-        return `
-            <div class="carousel-slide" data-link="${banner.link_url || ''}">
-                <img src="${imgUrl}" alt="Рекламный баннер" loading="lazy">
-            </div>
-        `;
-    }).join('');
-
-    dotsContainer.innerHTML = banners.map((_, idx) => `
-        <div class="dot ${idx === currentBannerIndex ? 'active' : ''}" data-index="${idx}"></div>
-    `).join('');
-
-    updateCarouselPosition();
-
-    // Обработчики кликов
-    document.querySelectorAll('.carousel-slide').forEach((slide, idx) => {
-        slide.addEventListener('click', () => {
-            const link = banners[idx]?.link_url;
-            if (link) window.open(link, '_blank');
-        });
-    });
-
-    document.querySelectorAll('.dot').forEach(dot => {
-        dot.addEventListener('click', (e) => {
-            const idx = parseInt(dot.dataset.index);
-            if (!isNaN(idx)) goToBanner(idx);
-        });
-    });
-
-    if (autoSlideInterval) clearInterval(autoSlideInterval);
-    autoSlideInterval = setInterval(() => nextBanner(), 5000);
 }
 
 userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
@@ -1329,6 +1184,7 @@ userBot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     } catch (sendError) {}
   }
 });
+
 adminBot.onText(/\/setlogo(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   if (!isAdmin(msg)) return;
   
@@ -1459,104 +1315,6 @@ adminBot.onText(/\/logos/, async (msg) => {
   } catch (error) {
     console.error('❌ Ошибка получения логотипов:', error);
     adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении логотипов');
-  }
-});
-
-
-// ДОБАВИТЬ БАННЕР (мультиформатный)
-adminBot.onText(/\/addbanner/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  const chatId = msg.chat.id;
-  
-  userStates[chatId] = { 
-    action: 'add_banner', 
-    step: 'awaiting_mobile',
-    bannerData: {}
-  };
-  
-  adminBot.sendMessage(
-    chatId,
-    '📱 *ШАГ 1/4: Баннер для телефона*\n\n' +
-    'Размер: *600×250px* (соотношение 2.4:1)\n\n' +
-    'Отправьте ссылку на изображение:',
-    { parse_mode: 'Markdown' }
-  );
-});
-
-adminBot.onText(/\/previewbanners/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  const chatId = msg.chat.id;
-  
-  try {
-    const result = await pool.query(
-      'SELECT id, mobile_url, tablet_url, desktop_url FROM banners WHERE is_active = true ORDER BY id'
-    );
-    
-    if (result.rows.length === 0) {
-      return adminBot.sendMessage(chatId, '📭 Нет активных баннеров');
-    }
-    
-    for (const banner of result.rows) {
-      const keyboard = {
-        inline_keyboard: [
-          [
-            { text: '📱 Моб', callback_data: `preview_banner:mobile:${banner.mobile_url}` },
-            { text: '📱 Планшет', callback_data: `preview_banner:tablet:${banner.tablet_url}` },
-            { text: '💻 Декс', callback_data: `preview_banner:desktop:${banner.desktop_url}` }
-          ]
-        ]
-      };
-      
-      await adminBot.sendMessage(
-        chatId,
-        `🖼️ *Баннер #${banner.id}*\n\n📱 600×250 | 📱 800×300 | 💻 1200×400`,
-        { parse_mode: 'Markdown', reply_markup: keyboard }
-      );
-    }
-  } catch (err) {
-    adminBot.sendMessage(chatId, '❌ Ошибка');
-  }
-});
-
-// УДАЛИТЬ БАННЕР (показать список)
-adminBot.onText(/\/delbanner/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  const chatId = msg.chat.id;
-  try {
-    const res = await pool.query('SELECT id, image_url FROM banners ORDER BY order_index, id');
-    if (res.rows.length === 0) {
-      return adminBot.sendMessage(chatId, '📭 Нет баннеров для удаления.');
-    }
-    const keyboard = {
-      inline_keyboard: res.rows.map(b => [
-        { text: `🗑️ Баннер #${b.id}`, callback_data: `del_banner:${b.id}` }
-      ])
-    };
-    adminBot.sendMessage(chatId, 'Выберите баннер для удаления:', { reply_markup: keyboard });
-  } catch (err) {
-    adminBot.sendMessage(chatId, '❌ Ошибка загрузки баннеров');
-  }
-});
-
-// СПИСОК БАННЕРОВ
-adminBot.onText(/\/banners/, async (msg) => {
-  if (!isAdmin(msg)) return;
-  const chatId = msg.chat.id;
-  try {
-    const res = await pool.query('SELECT id, image_url, link_url, is_active FROM banners ORDER BY order_index');
-    if (res.rows.length === 0) {
-      return adminBot.sendMessage(chatId, '📭 Нет баннеров');
-    }
-    let text = '📸 *Список баннеров*\n\n';
-    res.rows.forEach(b => {
-      text += `ID: ${b.id}\n`;
-      text += `🖼️ ${b.image_url.substring(0, 50)}...\n`;
-      text += `🔗 ${b.link_url || 'нет ссылки'}\n`;
-      text += `🟢 ${b.is_active ? 'активен' : 'неактивен'}\n\n`;
-    });
-    adminBot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
-  } catch (err) {
-    adminBot.sendMessage(chatId, '❌ Ошибка');
   }
 });
 
@@ -1837,7 +1595,7 @@ adminBot.onText(/\/start/, async (msg) => {
     return;
   }
   
-  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n🎮 Управление играми:\n/games - список всех игр\n/addgame - добавить новую игру\n/setlogo - установить логотип игры\n/setbanner - установить баннер игры\n/gameinfo - информация об игре\n/logos - список всех логотипов\n/banners - список всех баннеров\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
+  const welcomeText = `👋 Привет, администратор!\n\n📋 Доступные команды:\n/orders - просмотреть заказы\n/stats - статистика магазина\n/products - список товаров\n/add_product - добавить товар\n/edit_price - изменить цену товара\n/delete_product - удалить товар\n/rate - текущий курс DCoin\n/setrate [курс] - установить курс DCoin\n/addbalance [id] [сумма] - пополнить баланс пользователя\n/debt - список задолженностей\n/cancel - отменить текущее действие\n\n🎮 Управление играми:\n/games - список всех игр\n/addgame - добавить новую игру\n/setlogo - установить логотип игры\n/setbanner - установить баннер игры\n/gameinfo - информация об игре\n/logos - список всех логотипов\n/gamesbanners - список всех баннеров игр\n\n📸 Рекламные баннеры:\n/addbanner - добавить рекламный баннер (3 размера: 600x250, 800x300, 1200x400)\n/delbanner - удалить рекламный баннер\n/previewbanners - показать превью всех баннеров\n/banners - список всех баннеров\n\n💬 Поддержка:\n/dialogs - список активных диалогов\n\nℹ️ Для добавления товара используйте /add_product\n💰 Для изменения цены используйте /edit_price`;
   adminBot.sendMessage(msg.chat.id, welcomeText);
 });
 
@@ -1914,25 +1672,25 @@ adminBot.onText(/\/setbanner(?:\s+(\S+)\s+(.+))?/, async (msg, match) => {
   }
 });
 
-adminBot.onText(/\/banners/, async (msg) => {
+adminBot.onText(/\/gamesbanners/, async (msg) => {
   if (!isAdmin(msg)) return;
   
   try {
     const result = await pool.query('SELECT id, name, banner_url FROM games WHERE banner_url IS NOT NULL');
     
     if (result.rows.length === 0) {
-      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных баннеров');
+      return adminBot.sendMessage(msg.chat.id, '📭 Нет установленных баннеров игр');
     }
     
-    let text = '🏞️ Установленные баннеры:\n\n';
+    let text = '🏞️ Установленные баннеры игр:\n\n';
     result.rows.forEach(game => {
       text += `🎮 ${game.name} (${game.id})\n${game.banner_url}\n\n`;
     });
     
     adminBot.sendMessage(msg.chat.id, text);
   } catch (error) {
-    console.error('Ошибка получения баннеров:', error);
-    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении баннеров');
+    console.error('Ошибка получения баннеров игр:', error);
+    adminBot.sendMessage(msg.chat.id, '❌ Ошибка при получении баннеров игр');
   }
 });
 
@@ -2549,6 +2307,103 @@ adminBot.onText(/\/cancel/, async (msg) => {
   }
 });
 
+// ДОБАВИТЬ РЕКЛАМНЫЙ БАННЕР
+adminBot.onText(/\/addbanner/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  
+  userStates[chatId] = { 
+    action: 'add_banner', 
+    step: 'awaiting_mobile',
+    bannerData: {}
+  };
+  
+  adminBot.sendMessage(
+    chatId,
+    '📱 ШАГ 1/4: Баннер для телефона\n\nРазмер: 600x250 пикселей\n\nОтправьте ссылку на изображение:'
+  );
+});
+
+// УДАЛИТЬ РЕКЛАМНЫЙ БАННЕР
+adminBot.onText(/\/delbanner/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  try {
+    const res = await pool.query('SELECT id, mobile_url FROM banners ORDER BY order_index, id');
+    if (res.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет баннеров для удаления.');
+    }
+    const keyboard = {
+      inline_keyboard: res.rows.map(b => [
+        { text: `🗑️ Баннер #${b.id}`, callback_data: `del_banner:${b.id}` }
+      ])
+    };
+    adminBot.sendMessage(chatId, 'Выберите баннер для удаления:', { reply_markup: keyboard });
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка загрузки баннеров');
+  }
+});
+
+// СПИСОК РЕКЛАМНЫХ БАННЕРОВ
+adminBot.onText(/\/banners/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  try {
+    const res = await pool.query('SELECT id, mobile_url, tablet_url, desktop_url, link_url, is_active FROM banners ORDER BY order_index');
+    if (res.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет баннеров');
+    }
+    let text = '📸 *Список рекламных баннеров*\n\n';
+    res.rows.forEach(b => {
+      text += `ID: ${b.id}\n`;
+      text += `📱 Моб: ${b.mobile_url.substring(0, 50)}...\n`;
+      text += `📱 Планшет: ${b.tablet_url.substring(0, 50)}...\n`;
+      text += `💻 Декс: ${b.desktop_url.substring(0, 50)}...\n`;
+      text += `🔗 ${b.link_url || 'нет ссылки'}\n`;
+      text += `🟢 ${b.is_active ? 'активен' : 'неактивен'}\n\n`;
+    });
+    adminBot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка');
+  }
+});
+
+// ПРЕДПРОСМОТР ВСЕХ БАННЕРОВ
+adminBot.onText(/\/previewbanners/, async (msg) => {
+  if (!isAdmin(msg)) return;
+  const chatId = msg.chat.id;
+  
+  try {
+    const result = await pool.query(
+      'SELECT id, mobile_url, tablet_url, desktop_url FROM banners WHERE is_active = true ORDER BY id'
+    );
+    
+    if (result.rows.length === 0) {
+      return adminBot.sendMessage(chatId, '📭 Нет активных баннеров');
+    }
+    
+    for (const banner of result.rows) {
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '📱 Моб 600x250', callback_data: `preview_banner:mobile:${banner.mobile_url}` },
+            { text: '📱 Планшет 800x300', callback_data: `preview_banner:tablet:${banner.tablet_url}` },
+            { text: '💻 Декс 1200x400', callback_data: `preview_banner:desktop:${banner.desktop_url}` }
+          ]
+        ]
+      };
+      
+      await adminBot.sendMessage(
+        chatId,
+        `🖼️ *Рекламный баннер #${banner.id}*`,
+        { parse_mode: 'Markdown', reply_markup: keyboard }
+      );
+    }
+  } catch (err) {
+    adminBot.sendMessage(chatId, '❌ Ошибка');
+  }
+});
+
 adminBot.on('callback_query', async (cb) => {
   const data = cb.data;
   const chatId = cb.message.chat.id;
@@ -2560,7 +2415,42 @@ adminBot.on('callback_query', async (cb) => {
 
   console.log('Callback получен:', data);
 
-  
+  // Удаление баннера
+  if (data.startsWith('del_banner:')) {
+    const bannerId = data.split(':')[1];
+    try {
+      await pool.query('DELETE FROM banners WHERE id = $1', [bannerId]);
+      await adminBot.editMessageText(`✅ Баннер #${bannerId} удалён`, {
+        chat_id: chatId,
+        message_id: messageId
+      });
+      await adminBot.answerCallbackQuery(cb.id, { text: 'Удалено' });
+    } catch (err) {
+      await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка', show_alert: true });
+    }
+    return;
+  }
+
+  // Предпросмотр баннера
+  if (data.startsWith('preview_banner:')) {
+    const parts = data.split(':');
+    const type = parts[1];
+    const url = parts.slice(2).join(':');
+    
+    let caption = '';
+    if (type === 'mobile') caption = '📱 Мобильный баннер (600x250px)';
+    else if (type === 'tablet') caption = '📱 Планшетный баннер (800x300px)';
+    else caption = '💻 Десктопный баннер (1200x400px)';
+    
+    try {
+      await adminBot.sendPhoto(chatId, url, { caption });
+      await adminBot.answerCallbackQuery(cb.id);
+    } catch (err) {
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Не удалось загрузить', show_alert: true });
+    }
+    return;
+  }
+
   if (data.startsWith('confirm_payment_')) {
     const orderId = data.replace('confirm_payment_', '');
     
@@ -2619,28 +2509,7 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
-
-
-  if (data.startsWith('preview_banner:')) {
-  const parts = data.split(':');
-  const type = parts[1]; // mobile, tablet, desktop
-  const url = parts.slice(2).join(':');
   
-  let caption = '';
-  if (type === 'mobile') caption = '📱 Мобильный баннер (600×250px)';
-  else if (type === 'tablet') caption = '📱 Планшетный баннер (800×300px)';
-  else caption = '💻 Десктопный баннер (1200×400px)';
-  
-  try {
-    await adminBot.sendPhoto(chatId, url, { caption });
-    await adminBot.answerCallbackQuery(cb.id);
-  } catch (err) {
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Не удалось загрузить', show_alert: true });
-  }
-  return;
-}
-  
-  // Обработка отклонения оплаты (нет денег)
   if (data.startsWith('reject_payment_')) {
     const orderId = data.replace('reject_payment_', '');
     
@@ -2698,21 +2567,6 @@ adminBot.on('callback_query', async (cb) => {
     }
     return;
   }
-  
-  if (data.startsWith('del_banner:')) {
-  const bannerId = data.split(':')[1];
-  try {
-    await pool.query('DELETE FROM banners WHERE id = $1', [bannerId]);
-    await adminBot.editMessageText(`✅ Баннер #${bannerId} удалён`, {
-      chat_id: chatId,
-      message_id: messageId
-    });
-    await adminBot.answerCallbackQuery(cb.id, { text: 'Удалено' });
-  } catch (err) {
-    await adminBot.answerCallbackQuery(cb.id, { text: 'Ошибка', show_alert: true });
-  }
-  return;
-}
 
   if (data.startsWith('setlogo_prompt:')) {
     const gameId = data.split(':')[1];
@@ -4636,108 +4490,106 @@ adminBot.on('callback_query', async (cb) => {
   }
 
   if (data.startsWith('set_gift:')) {
-  const isGift = data.split(':')[1];
-  const userState = userStates[chatId];
+    const isGift = data.split(':')[1];
+    const userState = userStates[chatId];
 
-  if (!userState || userState.step !== 'awaiting_gift') {
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела', show_alert: true });
-    return;
-  }
+    if (!userState || userState.step !== 'awaiting_gift') {
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела', show_alert: true });
+      return;
+    }
 
-  const is_gift = isGift === '1';
-  userState.productData.is_gift = is_gift;
-  userState.step = 'awaiting_new';
+    const is_gift = isGift === '1';
+    userState.productData.is_gift = is_gift;
+    userState.step = 'awaiting_new';
 
-  // Убираем старую клавиатуру
-  await adminBot.editMessageReplyMarkup({
-    chat_id: chatId,
-    message_id: messageId,
-    reply_markup: { inline_keyboard: [] }
-  }).catch(() => {});
+    await adminBot.editMessageReplyMarkup({
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] }
+    }).catch(() => {});
 
-  // Отправляем новое сообщение с кнопками
-  await adminBot.sendMessage(chatId,
-    `✅ Подарок: ${is_gift ? 'Да' : 'Нет'}\n\n` +
-    `Шаг 5/5: Это новинка (с меткой 🆕)?\n\n` +
-    `Название: ${userState.productData.name}\n` +
-    `Цена: ${formatRub(userState.productData.price)}`,
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '🆕 Да, новый товар', callback_data: 'set_new:1' },
-            { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
+    await adminBot.sendMessage(chatId,
+      `✅ Подарок: ${is_gift ? 'Да' : 'Нет'}\n\n` +
+      `Шаг 5/5: Это новинка (с меткой 🆕)?\n\n` +
+      `Название: ${userState.productData.name}\n` +
+      `Цена: ${formatRub(userState.productData.price)}`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '🆕 Да, новый товар', callback_data: 'set_new:1' },
+              { text: '❌ Нет, обычный товар', callback_data: 'set_new:0' }
+            ]
           ]
-        ]
+        }
       }
-    }
-  );
+    );
 
-  await adminBot.answerCallbackQuery(cb.id);
-  return;
-}
-
-if (data.startsWith('set_new:')) {
-  const isNew = data.split(':')[1];
-  const userState = userStates[chatId];
-  
-  if (!userState || userState.step !== 'awaiting_new') {
-    await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново командой /add_product', show_alert: true });
+    await adminBot.answerCallbackQuery(cb.id);
     return;
   }
-  
-  try {
-    const is_new = isNew === '1';
-    userState.productData.is_new = is_new;
+
+  if (data.startsWith('set_new:')) {
+    const isNew = data.split(':')[1];
+    const userState = userStates[chatId];
     
-    const timestamp = Date.now();
-    const randomString = Math.random().toString(36).substring(2, 8);
-    const id = `prod_${timestamp}_${randomString}`;
-    
-    const { name, price, image_url, game_id, is_gift, is_new: newFlag } = userState.productData;
-    
-    await pool.query(
-      'INSERT INTO products (id, name, price, image_url, is_gift, is_new, game_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-      [id, name, price, image_url, is_gift, newFlag, game_id]
-    );
-    
-    const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
-    const gameName = gameResult.rows[0]?.name || 'Неизвестно';
-    
-    const successText = `🎉 Товар успешно добавлен!\n\n` +
-      `📝 Информация о товаре:\n` +
-      `🆔 ID: \`${id}\`\n` +
-      `🎮 Игра: ${gameName}\n` +
-      `🏷️ Название: ${name}\n` +
-      `💰 Цена: ${formatRub(price)}\n` +
-      `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
-      `🆕 Новинка: ${newFlag ? '✅ Да' : '❌ Нет'}\n` +
-      `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
-    
-    if (userState.messageId) {
-      await adminBot.deleteMessage(chatId, userState.messageId).catch(e => console.log('Ошибка удаления:', e.message));
+    if (!userState || userState.step !== 'awaiting_new') {
+      await adminBot.answerCallbackQuery(cb.id, { text: '❌ Сессия устарела. Начните заново командой /add_product', show_alert: true });
+      return;
     }
-    await adminBot.deleteMessage(chatId, messageId).catch(e => console.log('Ошибка удаления:', e.message));
-    await adminBot.sendMessage(chatId, successText, { parse_mode: 'Markdown' });
     
-    delete userStates[chatId];
-    
-    await adminBot.answerCallbackQuery(cb.id, { 
-      text: '✅ Товар добавлен!',
-      show_alert: false
-    });
-    
-  } catch (error) {
-    console.error('❌ Ошибка сохранения товара:', error);
-    delete userStates[chatId];
-    await adminBot.sendMessage(chatId, '❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product');
-    await adminBot.answerCallbackQuery(cb.id, { 
-      text: '❌ Ошибка сохранения',
-      show_alert: true
-    });
+    try {
+      const is_new = isNew === '1';
+      userState.productData.is_new = is_new;
+      
+      const timestamp = Date.now();
+      const randomString = Math.random().toString(36).substring(2, 8);
+      const id = `prod_${timestamp}_${randomString}`;
+      
+      const { name, price, image_url, game_id, is_gift, is_new: newFlag } = userState.productData;
+      
+      await pool.query(
+        'INSERT INTO products (id, name, price, image_url, is_gift, is_new, game_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [id, name, price, image_url, is_gift, newFlag, game_id]
+      );
+      
+      const gameResult = await pool.query('SELECT name FROM games WHERE id = $1', [game_id]);
+      const gameName = gameResult.rows[0]?.name || 'Неизвестно';
+      
+      const successText = `🎉 Товар успешно добавлен!\n\n` +
+        `📝 Информация о товаре:\n` +
+        `🆔 ID: \`${id}\`\n` +
+        `🎮 Игра: ${gameName}\n` +
+        `🏷️ Название: ${name}\n` +
+        `💰 Цена: ${formatRub(price)}\n` +
+        `🎁 Подарок: ${is_gift ? '✅ Да' : '❌ Нет'}\n` +
+        `🆕 Новинка: ${newFlag ? '✅ Да' : '❌ Нет'}\n` +
+        `🖼️ Изображение: ${image_url.substring(0, 50)}...`;
+      
+      if (userState.messageId) {
+        await adminBot.deleteMessage(chatId, userState.messageId).catch(e => console.log('Ошибка удаления:', e.message));
+      }
+      await adminBot.deleteMessage(chatId, messageId).catch(e => console.log('Ошибка удаления:', e.message));
+      await adminBot.sendMessage(chatId, successText, { parse_mode: 'Markdown' });
+      
+      delete userStates[chatId];
+      
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '✅ Товар добавлен!',
+        show_alert: false
+      });
+      
+    } catch (error) {
+      console.error('❌ Ошибка сохранения товара:', error);
+      delete userStates[chatId];
+      await adminBot.sendMessage(chatId, '❌ Ошибка при сохранении товара. Попробуйте еще раз командой /add_product');
+      await adminBot.answerCallbackQuery(cb.id, { 
+        text: '❌ Ошибка сохранения',
+        show_alert: true
+      });
+    }
+    return;
   }
-  return;
-}
 
   await adminBot.answerCallbackQuery(cb.id, {
     text: '⚠️ Неизвестная команда',
@@ -4754,6 +4606,64 @@ adminBot.on('message', async (msg) => {
   if (text.startsWith('/')) return;
   
   const userState = userStates[chatId];
+
+  // Обработка добавления рекламного баннера
+  if (userState && userState.action === 'add_banner') {
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+
+    if (userState.step === 'awaiting_mobile') {
+      if (!text.startsWith('http://') && !text.startsWith('https://')) {
+        return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
+      }
+      userState.bannerData.mobile_url = text;
+      userState.step = 'awaiting_tablet';
+      return adminBot.sendMessage(chatId, '📱 ШАГ 2/4: Баннер для планшета\n\nРазмер: 800x300 пикселей\n\nОтправьте ссылку на изображение:');
+    }
+
+    if (userState.step === 'awaiting_tablet') {
+      if (!text.startsWith('http://') && !text.startsWith('https://')) {
+        return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
+      }
+      userState.bannerData.tablet_url = text;
+      userState.step = 'awaiting_desktop';
+      return adminBot.sendMessage(chatId, '💻 ШАГ 3/4: Баннер для компьютера\n\nРазмер: 1200x400 пикселей\n\nОтправьте ссылку на изображение:');
+    }
+
+    if (userState.step === 'awaiting_desktop') {
+      if (!text.startsWith('http://') && !text.startsWith('https://')) {
+        return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
+      }
+      userState.bannerData.desktop_url = text;
+      userState.step = 'awaiting_link';
+      return adminBot.sendMessage(chatId, '🔗 ШАГ 4/4: Ссылка на баннере\n\nВведите URL (или отправьте "нет"):');
+    }
+
+    if (userState.step === 'awaiting_link') {
+      let link_url = null;
+      if (text.toLowerCase() !== 'нет') {
+        if (!text.startsWith('http://') && !text.startsWith('https://')) {
+          return adminBot.sendMessage(chatId, '❌ Введите корректный URL (или "нет")');
+        }
+        link_url = text;
+      }
+      
+      try {
+        const result = await pool.query(
+          `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
+           VALUES ($1, $2, $3, $4) RETURNING id`,
+          [userState.bannerData.mobile_url, userState.bannerData.tablet_url, userState.bannerData.desktop_url, link_url]
+        );
+        
+        adminBot.sendMessage(chatId, `✅ Баннер #${result.rows[0].id} успешно добавлен!`);
+      } catch (err) {
+        console.error('Ошибка сохранения баннера:', err);
+        adminBot.sendMessage(chatId, '❌ Ошибка при сохранении баннера: ' + err.message);
+      }
+      delete userStates[chatId];
+      return;
+    }
+  }
   
   if (userState && userState.action === 'setlogo' && userState.step === 'awaiting_logo_url') {
     const gameId = userState.gameId;
@@ -4808,102 +4718,6 @@ adminBot.on('message', async (msg) => {
     return;
   }
 
-  if (userState && userState.action === 'add_banner') {
-  const chatId = msg.chat.id;
-  const text = msg.text.trim();
-
-  // ШАГ 1: Мобильный баннер (600×250)
-  if (userState.step === 'awaiting_mobile') {
-    if (!text.startsWith('http://') && !text.startsWith('https://')) {
-      return adminBot.sendMessage(chatId, '❌ Введите корректный URL (http:// или https://)');
-    }
-    userState.bannerData.mobile_url = text;
-    userState.step = 'awaiting_tablet';
-    return adminBot.sendMessage(
-      chatId,
-      '📱 *ШАГ 2/4: Баннер для планшета*\n\n' +
-      'Размер: *800×300px* (соотношение 2.66:1)\n\n' +
-      'Отправьте ссылку на изображение:',
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  // ШАГ 2: Планшетный баннер (800×300)
-  if (userState.step === 'awaiting_tablet') {
-    if (!text.startsWith('http://') && !text.startsWith('https://')) {
-      return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
-    }
-    userState.bannerData.tablet_url = text;
-    userState.step = 'awaiting_desktop';
-    return adminBot.sendMessage(
-      chatId,
-      '💻 *ШАГ 3/4: Баннер для компьютера*\n\n' +
-      'Размер: *1200×400px* (соотношение 3:1)\n\n' +
-      'Отправьте ссылку на изображение:',
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  // ШАГ 3: Десктопный баннер (1200×400)
-  if (userState.step === 'awaiting_desktop') {
-    if (!text.startsWith('http://') && !text.startsWith('https://')) {
-      return adminBot.sendMessage(chatId, '❌ Введите корректный URL');
-    }
-    userState.bannerData.desktop_url = text;
-    userState.step = 'awaiting_link';
-    return adminBot.sendMessage(
-      chatId,
-      '🔗 *ШАГ 4/4: Ссылка на баннере*\n\n' +
-      'Введите URL, куда перейдёт пользователь при клике.\n' +
-      'Или отправьте "нет", если ссылка не нужна:',
-      { parse_mode: 'Markdown' }
-    );
-  }
-
-  // ШАГ 4: Ссылка (опционально)
-  if (userState.step === 'awaiting_link') {
-    let link_url = null;
-    if (text.toLowerCase() !== 'нет') {
-      if (!text.startsWith('http://') && !text.startsWith('https://')) {
-        return adminBot.sendMessage(chatId, '❌ Введите корректный URL (или "нет")');
-      }
-      link_url = text;
-    }
-    
-    try {
-      await pool.query(
-        `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
-         VALUES ($1, $2, $3, $4)`,
-        [userState.bannerData.mobile_url, userState.bannerData.tablet_url, userState.bannerData.desktop_url, link_url]
-      );
-      
-      const previewKeyboard = {
-        inline_keyboard: [
-          [
-            { text: '📱 Мобильный', callback_data: `preview_banner:mobile:${userState.bannerData.mobile_url}` },
-            { text: '📱 Планшет', callback_data: `preview_banner:tablet:${userState.bannerData.tablet_url}` },
-            { text: '💻 Десктоп', callback_data: `preview_banner:desktop:${userState.bannerData.desktop_url}` }
-          ]
-        ]
-      };
-      
-      await adminBot.sendMessage(
-        chatId,
-        '✅ *Баннер успешно добавлен!*\n\n' +
-        '📱 Мобильный: 600×250px\n' +
-        '📱 Планшет: 800×300px\n' +
-        '💻 Десктоп: 1200×400px\n' +
-        (link_url ? `🔗 Ссылка: ${link_url}` : '🔗 Без ссылки'),
-        { parse_mode: 'Markdown', reply_markup: previewKeyboard }
-      );
-    } catch (err) {
-      console.error(err);
-      adminBot.sendMessage(chatId, '❌ Ошибка при сохранении баннера');
-    }
-    delete userStates[chatId];
-    return;
-  }
-}
   if (!userState) return;
   
   console.log('📨 Получено сообщение от админа в состоянии:', userState);
@@ -8373,7 +8187,6 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// Self.PayAnyWay - создание платежа (редирект на форму)
 app.post('/api/self-pay/create', async (req, res) => {
     try {
         const { orderId, amount, description, successUrl, failUrl } = req.body;
@@ -8397,12 +8210,10 @@ app.post('/api/self-pay/create', async (req, res) => {
             callback_url: `${SERVER_URL}/api/self-pay/callback`
         };
 
-        // Генерируем подпись
         paymentParams.signature = generateSelfSignature(paymentParams, SELF_SECRET_KEY);
 
         console.log('📤 Self.PayAnyWay params:', paymentParams);
 
-        // Формируем URL для редиректа
         const formUrl = `${SELF_PAYMENT_URL}?${new URLSearchParams(paymentParams).toString()}`;
 
         res.json({
@@ -8553,7 +8364,6 @@ app.post('/api/bilee-webhook', async (req, res) => {
   }
 });
 
-// Self.PayAnyWay - callback для уведомлений
 app.post('/api/self-pay/callback', async (req, res) => {
     try {
         const callbackData = req.body;
@@ -8565,7 +8375,6 @@ app.post('/api/self-pay/callback', async (req, res) => {
             return res.status(200).send('OK');
         }
 
-        // Проверяем подпись
         const expectedSignature = generateSelfSignature(
             { order_id, payment_id, status }, 
             SELF_SECRET_KEY
@@ -8668,28 +8477,6 @@ app.get('/api/games', async (req, res) => {
     });
   } catch (error) {
     console.error('Ошибка получения игр:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
-
-app.get('/api/games/:slug', async (req, res) => {
-  try {
-    const { slug } = req.params;
-    const result = await pool.query(
-      'SELECT * FROM games WHERE slug = $1',
-      [slug]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Game not found' });
-    }
-    
-    res.json({ 
-      success: true, 
-      game: result.rows[0] 
-    });
-  } catch (error) {
-    console.error('Ошибка получения игры:', error);
     res.status(500).json({ success: false, error: 'Database error' });
   }
 });
@@ -8894,7 +8681,6 @@ app.post('/api/payment-confirmation', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Missing required fields' });
         }
         
-        // Формируем читаемый состав заказа
         let itemsList = '';
         for (const [productId, quantity] of Object.entries(items)) {
             try {
@@ -8906,13 +8692,11 @@ app.post('/api/payment-confirmation', async (req, res) => {
             }
         }
         
-        // Форматируем дату
         const paymentDate = new Date(timestamp).toLocaleString('ru-RU', {
             day: '2-digit', month: '2-digit', year: 'numeric',
             hour: '2-digit', minute: '2-digit', second: '2-digit'
         });
         
-        // Получаем email пользователя, если есть
         let userEmail = 'не указан';
         let userTgId = null;
         try {
@@ -8947,13 +8731,11 @@ app.post('/api/payment-confirmation', async (req, res) => {
             ]
         };
         
-        // Отправляем админу уведомление с кнопками
         await adminBot.sendMessage(ADMIN_ID, message, { 
             parse_mode: 'Markdown',
             reply_markup: keyboard
         });
         
-        // Обновляем статус заказа в БД на "waiting_manual_check" (ожидает ручной проверки)
         await pool.query(
             `UPDATE orders SET status = 'waiting_manual_check' WHERE order_id = $1`,
             [orderId]
@@ -8965,6 +8747,53 @@ app.post('/api/payment-confirmation', async (req, res) => {
         console.error('Ошибка при отправке уведомления об оплате:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
+});
+
+app.get('/api/banners', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, mobile_url, tablet_url, desktop_url, link_url FROM banners WHERE is_active = true ORDER BY order_index ASC, id ASC'
+    );
+    res.json({ success: true, banners: result.rows });
+  } catch (error) {
+    console.error('Ошибка получения баннеров:', error);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+app.post('/api/admin/banners', async (req, res) => {
+  try {
+    const { mobile_url, tablet_url, desktop_url, link_url } = req.body;
+    
+    if (!mobile_url || !tablet_url || !desktop_url) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'mobile_url, tablet_url and desktop_url are required' 
+      });
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO banners (mobile_url, tablet_url, desktop_url, link_url) 
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [mobile_url, tablet_url, desktop_url, link_url || null]
+    );
+    
+    res.json({ success: true, bannerId: result.rows[0].id });
+  } catch (error) {
+    console.error('Ошибка добавления баннера:', error);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+app.delete('/api/admin/banners/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM banners WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка удаления баннера:', error);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
 });
 
 app.get('/api/firebase-config', (req, res) => {
