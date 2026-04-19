@@ -7563,24 +7563,27 @@ app.get('/api/auth/telegram/start', async (req, res) => {
     const nonce = crypto.randomBytes(16).toString('hex');
     const state = crypto.randomBytes(16).toString('hex');
     
+    
+    const BOT_ID = parseInt(process.env.TELEGRAM_BOT_TOKEN.split(':')[0]);
+    
     authNonces.set(nonce, { state, createdAt: Date.now() });
     
     const oauthUrl = `https://oauth.telegram.org/auth?${new URLSearchParams({
-      bot_id: TELEGRAM_APP_ID,
-      origin: SITE_URL,
+      bot_id: BOT_ID,
+      origin: 'https://shopdxs.ru',
       embed: '1',
       request_access: 'write',
       nonce: nonce,
       state: state
     })}`;
     
+    console.log('OAuth URL:', oauthUrl);
     res.json({ success: true, url: oauthUrl });
   } catch (error) {
     console.error('Ошибка начала OAuth:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
-
 app.get('/api/games/:slug', async (req, res) => {
   try {
     const { slug } = req.params;
