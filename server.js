@@ -20,7 +20,7 @@ const SELF_PAYMENT_URL = process.env.SELF_PAYMENT_URL;
 const BILEE_API_URL = 'https://paymentgate.bilee.ru/api';
 const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_OAUTH_BOT_TOKEN = process.env.USER_BOT_TOKEN;
 const USER_BOT_TOKEN = process.env.USER_BOT_TOKEN;
 const USER_BOT_USERNAME = process.env.USER_BOT_USERNAME;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
@@ -7564,7 +7564,7 @@ app.get('/api/auth/telegram/start', async (req, res) => {
     const state = crypto.randomBytes(16).toString('hex');
     
     
-    const BOT_ID = parseInt(process.env.TELEGRAM_BOT_TOKEN.split(':')[0]);
+    const BOT_ID = parseInt(process.env.USER_BOT_TOKEN.split(':')[0]);
     
     authNonces.set(nonce, { state, createdAt: Date.now() });
     
