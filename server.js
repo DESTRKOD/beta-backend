@@ -21,6 +21,7 @@ const BILEE_API_URL = 'https://paymentgate.bilee.ru/api';
 const BILEE_SHOP_ID = process.env.BILEE_SHOP_ID;
 const BILEE_PASSWORD = process.env.BILEE_PASSWORD;
 const TELEGRAM_OAUTH_BOT_TOKEN = process.env.USER_BOT_TOKEN;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const USER_BOT_TOKEN = process.env.USER_BOT_TOKEN;
 const USER_BOT_USERNAME = process.env.USER_BOT_USERNAME;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
