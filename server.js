@@ -29,7 +29,6 @@ const SITE_URL = process.env.SITE_URL;
 const authNonces = new Map();
 const TELEGRAM_APP_ID = process.env.TELEGRAM_APP_ID;
 const TELEGRAM_APP_HASH = process.env.TELEGRAM_APP_HASH;
-const TELEGRAM_AUTH_KEY = crypto.createHmac('sha256', TELEGRAM_BOT_TOKEN).update('WebAppData').digest();
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
@@ -8206,17 +8205,18 @@ app.post('/api/auth/telegram/callback', async (req, res) => {
     const { user, auth_date } = payloadData;
     
     const checkString = [`auth_date=${auth_date}`, `nonce=${nonce}`, `payload=${payload}`].sort().join('\n');
-    const expectedHash = crypto.createHmac('sha256', TELEGRAM_AUTH_KEY).update(checkString).digest('hex');
+    const secretKey = crypto.createHash('sha256').update(process.env.USER_BOT_TOKEN).digest();
+    const expectedHash = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
     
     if (hash !== expectedHash) {
       return res.status(400).json({ success: false, error: 'Invalid hash' });
     }
     
     const tgId = user.id.toString();
-    const firstName = user.first_name;
-    const lastName = user.last_name;
-    const username = user.username;
-    const photoUrl = user.photo_url;
+    const firstName = user.first_name || '';
+    const lastName = user.last_name || '';
+    const username = user.username || '';
+    const photoUrl = user.photo_url || null;
     
     let dbUser = await pool.query('SELECT * FROM users WHERE tg_id = $1', [tgId]);
     
