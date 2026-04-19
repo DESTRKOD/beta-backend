@@ -10,7 +10,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 const cors = require('cors');
 const multer = require('multer');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -7563,18 +7562,18 @@ app.get('/api/auth/telegram/start', async (req, res) => {
     const nonce = crypto.randomBytes(16).toString('hex');
     const state = crypto.randomBytes(16).toString('hex');
     
-    
     const BOT_ID = parseInt(process.env.USER_BOT_TOKEN.split(':')[0]);
     
     authNonces.set(nonce, { state, createdAt: Date.now() });
     
     const oauthUrl = `https://oauth.telegram.org/auth?${new URLSearchParams({
       bot_id: BOT_ID,
-      origin: 'https://shopdxs.ru',
-      embed: '1',
+      origin: SITE_URL,
+      embed: '0',
       request_access: 'write',
       nonce: nonce,
-      state: state
+      state: state,
+      redirect_uri: `${SITE_URL}/?tg_auth=pending`
     })}`;
     
     console.log('OAuth URL:', oauthUrl);
@@ -8259,18 +8258,21 @@ app.post('/api/auth/telegram/callback', async (req, res) => {
       createdAt: Date.now()
     });
     
-    const userData = {
-      id: dbUser.rows[0].id,
-      tgId: dbUser.rows[0].tg_id,
-      username: dbUser.rows[0].username,
-      firstName: dbUser.rows[0].first_name,
-      lastName: dbUser.rows[0].last_name,
-      telegramUsername: dbUser.rows[0].telegram_username,
-      auth_provider: dbUser.rows[0].auth_provider,
-      avatarUrl: dbUser.rows[0].avatar_url
-    };
-    
-    res.json({ success: true, token: sessionToken, user: userData });
+    // ВАЖНО: возвращаем token, а не просто user
+    res.json({ 
+      success: true, 
+      token: sessionToken,  // ← этот token нужно передать в URL
+      user: {
+        id: dbUser.rows[0].id,
+        tgId: dbUser.rows[0].tg_id,
+        username: dbUser.rows[0].username,
+        firstName: dbUser.rows[0].first_name,
+        lastName: dbUser.rows[0].last_name,
+        telegramUsername: dbUser.rows[0].telegram_username,
+        auth_provider: dbUser.rows[0].auth_provider,
+        avatarUrl: dbUser.rows[0].avatar_url
+      }
+    });
   } catch (error) {
     console.error('Ошибка callback:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
