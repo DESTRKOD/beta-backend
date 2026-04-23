@@ -7559,9 +7559,11 @@ app.post('/api/auth/start-register', async (req, res) => {
 
 app.get('/api/auth/telegram/start', async (req, res) => {
     try {
-        const state = crypto.randomBytes(32).toString('hex');
-        const nonce = crypto.randomBytes(16).toString('hex');
         const botId = parseInt(process.env.USER_BOT_TOKEN.split(':')[0]);
+        const nonce = crypto.randomBytes(16).toString('hex');
+        const state = crypto.randomBytes(16).toString('hex');
+        
+        const redirectUri = `${SITE_URL}/index.html?tg_auth=pending`;
         
         const oauthUrl = `https://oauth.telegram.org/auth?${new URLSearchParams({
             bot_id: botId,
@@ -7570,7 +7572,7 @@ app.get('/api/auth/telegram/start', async (req, res) => {
             request_access: 'write',
             nonce: nonce,
             state: state,
-            redirect_uri: `${SITE_URL}/?tg_auth=pending`
+            redirect_uri: redirectUri
         })}`;
         
         authNonces.set(nonce, { state, botId, createdAt: Date.now() });
@@ -7580,6 +7582,7 @@ app.get('/api/auth/telegram/start', async (req, res) => {
         }, 10 * 60 * 1000);
         
         res.json({ success: true, url: oauthUrl });
+        
     } catch (error) {
         console.error('Ошибка начала OAuth:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
@@ -8059,8 +8062,8 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
             return res.status(404).json({ success: false, error: 'User not found' });
         }
         
-        // остальной код без изменений
         const user = userResult.rows[0];
+        
         const ordersResult = await pool.query(`
             SELECT 
                 order_id as id, total, status, payment_status, code,
@@ -8101,7 +8104,7 @@ app.get('/api/auth/profile/:userId', async (req, res) => {
         res.json({ success: true, user: userData, orders: orders });
         
     } catch (error) {
-        console.error(`Ошибка профиля:`, error);
+        console.error('Ошибка профиля:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
@@ -8202,10 +8205,6 @@ app.get('/api/auth/telegram/callback', async (req, res) => {
     try {
         const { hash, auth_date, id, first_name, last_name, username, photo_url, nonce, state } = req.query;
         
-        if (!hash || !auth_date || !id || !nonce) {
-            return res.redirect(`${SITE_URL}/reg_log.html?error=missing_data`);
-        }
-        
         const savedNonce = authNonces.get(nonce);
         if (!savedNonce || savedNonce.state !== state) {
             return res.redirect(`${SITE_URL}/reg_log.html?error=invalid_nonce`);
@@ -8218,95 +8217,47 @@ app.get('/api/auth/telegram/callback', async (req, res) => {
             return res.redirect(`${SITE_URL}/reg_log.html?error=expired`);
         }
         
-        const tgId = id.toString();
         const checkString = [
             `auth_date=${auth_date}`,
-            `first_name=${first_name || ''}`,
             `id=${id}`,
-            `last_name=${last_name || ''}`,
             `nonce=${nonce}`,
-            `photo_url=${photo_url || ''}`,
-            `state=${state}`,
-            `username=${username || ''}`
-        ].filter(p => p.split('=')[1] && p.split('=')[1] !== '').sort().join('\n');
+            `state=${state}`
+        ].sort().join('\n');
         
         const secretKey = crypto.createHash('sha256').update(process.env.USER_BOT_TOKEN).digest();
         const expectedHash = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
         
         if (hash !== expectedHash) {
-            console.error('Invalid hash:', { hash, expectedHash });
             return res.redirect(`${SITE_URL}/reg_log.html?error=invalid_hash`);
         }
         
-        let dbUser = await pool.query('SELECT * FROM users WHERE tg_id = $1', [tgId]);
+        const tgId = id.toString();
+        let userResult = await pool.query('SELECT * FROM users WHERE tg_id = $1', [tgId]);
         
-        if (dbUser.rows.length === 0 && username) {
-            const existingByUsername = await pool.query(
-                'SELECT * FROM users WHERE telegram_username = $1 OR username = $1',
-                [username, username]
-            );
+        if (userResult.rows.length === 0) {
+            const displayName = username || `${first_name || ''} ${last_name || ''}`.trim() || `User_${tgId}`;
             
-            if (existingByUsername.rows.length > 0) {
-                const existingUser = existingByUsername.rows[0];
-                let newProvider = existingUser.auth_provider;
-                if (newProvider === 'vk') {
-                    newProvider = 'vk+telegram';
-                }
-                
-                await pool.query(
-                    `UPDATE users SET 
-                        tg_id = $1,
-                        telegram_username = $2,
-                        first_name = COALESCE($3, first_name),
-                        last_name = COALESCE($4, last_name),
-                        avatar_url = COALESCE($5, avatar_url),
-                        auth_provider = $6
-                     WHERE id = $7`,
-                    [tgId, username, first_name, last_name, photo_url, newProvider, existingUser.id]
-                );
-                
-                dbUser = await pool.query('SELECT * FROM users WHERE id = $1', [existingUser.id]);
-            }
-        }
-        
-        if (dbUser.rows.length === 0) {
-            let displayName = username || `${first_name} ${last_name}`.trim() || `User_${tgId}`;
-            let finalUsername = displayName;
-            let counter = 1;
-            
-            while (true) {
-                const existing = await pool.query('SELECT id FROM users WHERE username = $1', [finalUsername]);
-                if (existing.rows.length === 0) break;
-                finalUsername = `${displayName}_${counter++}`;
-            }
-            
-            const newUser = await pool.query(
+            userResult = await pool.query(
                 `INSERT INTO users (tg_id, username, first_name, last_name, telegram_username, avatar_url, auth_provider)
                  VALUES ($1, $2, $3, $4, $5, $6, 'telegram')
                  RETURNING *`,
-                [tgId, finalUsername, first_name, last_name, username, photo_url]
+                [tgId, displayName, first_name, last_name, username, photo_url]
             );
-            
-            dbUser = newUser;
         }
         
+        const user = userResult.rows[0];
         const sessionToken = crypto.randomBytes(32).toString('hex');
         
         authSessions.set(`auth_${sessionToken}`, {
-            userId: dbUser.rows[0].id,
+            userId: user.id,
             type: 'auth_success',
             createdAt: Date.now()
         });
         
-        setTimeout(() => {
-            authSessions.delete(`auth_${sessionToken}`);
-        }, 10 * 60 * 1000);
-        
-        const redirectUrl = `${SITE_URL}/?auth=${sessionToken}`;
-        res.redirect(redirectUrl);
+        res.redirect(`${SITE_URL}/index.html?auth=${sessionToken}`);
         
     } catch (error) {
-        console.error('Ошибка колбэка Telegram:', error);
+        console.error('Ошибка колбэка:', error);
         res.redirect(`${SITE_URL}/reg_log.html?error=server_error`);
     }
 });
