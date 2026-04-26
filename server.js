@@ -7631,7 +7631,35 @@ app.post('/api/auth/start-register', async (req, res) => {
 
 app.get('/api/auth/telegram/start', async (req, res) => {
     try {
-        const botId = parseInt(process.env.USER_BOT_TOKEN.split(':')[0]);
+        // 🔥 ПРОВЕРЯЕМ наличие токена
+        if (!process.env.USER_BOT_TOKEN) {
+            console.error('❌ USER_BOT_TOKEN не настроен в .env');
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Bot token not configured' 
+            });
+        }
+        
+        // 🔥 БЕЗОПАСНО получаем botId
+        const tokenParts = process.env.USER_BOT_TOKEN.split(':');
+        if (tokenParts.length < 2) {
+            console.error('❌ USER_BOT_TOKEN в неверном формате');
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Invalid bot token format' 
+            });
+        }
+        
+        const botId = parseInt(tokenParts[0]);
+        if (isNaN(botId)) {
+            console.error('❌ Не удалось получить botId из токена');
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Cannot parse bot ID' 
+            });
+        }
+        
+        // 🔥 ГЕНЕРИРУЕМ nonce и state
         const nonce = crypto.randomBytes(16).toString('hex');
         const state = crypto.randomBytes(16).toString('hex');
         
@@ -7647,67 +7675,43 @@ app.get('/api/auth/telegram/start', async (req, res) => {
             redirect_uri: redirectUri
         })}`;
         
-        authNonces.set(nonce, { state, botId, createdAt: Date.now() });
+        // 🔥 СОХРАНЯЕМ с проверкой authNonces
+        if (!authNonces) {
+            console.error('❌ authNonces не инициализирован');
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Internal error' 
+            });
+        }
         
+        authNonces.set(nonce, { 
+            state, 
+            botId, 
+            createdAt: Date.now() 
+        });
+        
+        // Автоочистка через 10 минут
         setTimeout(() => {
-            authNonces.delete(nonce);
+            if (authNonces.has(nonce)) {
+                authNonces.delete(nonce);
+                console.log(`🧹 Очищен nonce: ${nonce}`);
+            }
         }, 10 * 60 * 1000);
+        
+        console.log('✅ Telegram OAuth URL сгенерирован для botId:', botId);
+        console.log('🔗 URL:', oauthUrl);
         
         res.json({ success: true, url: oauthUrl });
         
     } catch (error) {
-        console.error('Ошибка начала OAuth:', error);
-        res.status(500).json({ success: false, error: 'Internal server error' });
+        console.error('❌ Ошибка начала OAuth:', error);
+        console.error('Stack:', error.stack);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Internal server error',
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
-});
-app.get('/api/games/:slug', async (req, res) => {
-  try {
-    const { slug } = req.params;
-    const result = await pool.query(
-      'SELECT * FROM games WHERE slug = $1 OR id = $1',
-      [slug]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Game not found' });
-    }
-    
-    res.json({ 
-      success: true, 
-      game: result.rows[0] 
-    });
-  } catch (error) {
-    console.error('Ошибка получения игры:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
-});
-
-app.post('/api/admin/games/logo', async (req, res) => {
-  try {
-    const { gameId, logoUrl } = req.body;
-    
-    if (!gameId || !logoUrl) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-    
-    const result = await pool.query(
-      'UPDATE games SET icon_url = $1 WHERE id = $2 RETURNING *',
-      [logoUrl, gameId]
-    );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Game not found' });
-    }
-    
-    res.json({ 
-      success: true, 
-      game: result.rows[0] 
-    });
-    
-  } catch (error) {
-    console.error('Ошибка обновления логотипа:', error);
-    res.status(500).json({ success: false, error: 'Database error' });
-  }
 });
 
 app.post('/api/admin/games/banner', async (req, res) => {
