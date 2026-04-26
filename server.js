@@ -35,7 +35,84 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-app.use(cors());
+function delayRedirect(res, redirectUrl, delay = 1500) {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Перенаправление...</title>
+      <style>
+        body {
+          font-family: system-ui, -apple-system, sans-serif;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          height: 100vh;
+          margin: 0;
+          background: linear-gradient(180deg, #0b3c91 0%, #1565c0 100%);
+          color: white;
+          text-align: center;
+        }
+        .container {
+          padding: 20px;
+        }
+        .spinner {
+          width: 50px;
+          height: 50px;
+          border: 4px solid rgba(255,255,255,0.3);
+          border-top-color: white;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+          margin: 20px auto;
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        .message {
+          font-size: 18px;
+          margin-top: 20px;
+        }
+        .timer {
+          font-size: 14px;
+          opacity: 0.8;
+          margin-top: 10px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="spinner"></div>
+        <div class="message">Авторизация успешна!</div>
+        <div class="timer">Перенаправление через <span id="counter">${Math.ceil(delay/1000)}</span> сек...</div>
+      </div>
+      <script>
+        let secondsLeft = ${Math.ceil(delay/1000)};
+        const counterElem = document.getElementById('counter');
+        const interval = setInterval(() => {
+          secondsLeft--;
+          if (counterElem) counterElem.textContent = secondsLeft;
+          if (secondsLeft <= 0) {
+            clearInterval(interval);
+            window.location.href = '${redirectUrl}';
+          }
+        }, 1000);
+        setTimeout(() => {
+          window.location.href = '${redirectUrl}';
+        }, ${delay});
+      </script>
+    </body>
+    </html>
+  `);
+}
+
+app.use(cors({
+  origin: process.env.SITE_URL || 'https://duck-shop.onrender.com',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -45,17 +122,12 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000
+    sameSite: 'none',
+    maxAge: 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    domain: process.env.NODE_ENV === 'production' ? '.onrender.com' : undefined
   }
 }));
-
-let maintenanceMode = {
-  active: false,
-  endTime: null,
-  duration: 0,
-  startedAt: null
-};
-
 function generateSelfSignature(params, secretKey) {
     const sortedKeys = Object.keys(params).sort();
     const signString = sortedKeys.map(key => params[key]).join('');
@@ -8254,7 +8326,7 @@ app.get('/api/auth/telegram/callback', async (req, res) => {
             createdAt: Date.now()
         });
         
-        res.redirect(`${SITE_URL}/index.html?auth=${sessionToken}`);
+        delayRedirect(res, `${SITE_URL}/index.html?auth=${sessionToken}`, 2000);
         
     } catch (error) {
         console.error('Ошибка колбэка:', error);
