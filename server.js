@@ -7799,6 +7799,91 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
+
+app.post('/api/auth/telegram/verify', async (req, res) => {
+    try {
+        const { id, first_name, last_name, username, photo_url, auth_date, hash } = req.body;
+        
+        if (!id || !auth_date || !hash) {
+            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        }
+        
+        const age = Math.floor(Date.now() / 1000) - parseInt(auth_date);
+        if (age > 86400) {
+            return res.status(400).json({ success: false, error: 'Auth data expired' });
+        }
+        
+        const checkString = [
+            `auth_date=${auth_date}`,
+            `first_name=${first_name || ''}`,
+            `id=${id}`,
+            `last_name=${last_name || ''}`,
+            `photo_url=${photo_url || ''}`,
+            `username=${username || ''}`
+        ].sort().join('\n');
+        
+        const secretKey = crypto.createHash('sha256').update(process.env.USER_BOT_TOKEN).digest();
+        const expectedHash = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
+        
+        if (hash !== expectedHash) {
+            return res.status(400).json({ success: false, error: 'Invalid hash' });
+        }
+        
+        const tgId = id.toString();
+        let userResult = await pool.query('SELECT * FROM users WHERE tg_id = $1', [tgId]);
+        
+        if (userResult.rows.length === 0) {
+            const displayName = username || `${first_name || ''} ${last_name || ''}`.trim() || `User_${tgId}`;
+            
+            userResult = await pool.query(
+                `INSERT INTO users (tg_id, username, first_name, last_name, telegram_username, avatar_url, auth_provider)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'telegram')
+                 RETURNING id, username, first_name, last_name, telegram_username, avatar_url`,
+                [tgId, displayName, first_name || '', last_name || '', username || '', photo_url || null]
+            );
+        } else {
+            await pool.query(
+                `UPDATE users SET 
+                    last_login = CURRENT_TIMESTAMP,
+                    first_name = COALESCE($1, first_name),
+                    last_name = COALESCE($2, last_name),
+                    telegram_username = COALESCE($3, telegram_username),
+                    avatar_url = COALESCE($4, avatar_url)
+                 WHERE id = $5`,
+                [first_name || null, last_name || null, username || null, photo_url || null, userResult.rows[0].id]
+            );
+        }
+        
+        const user = userResult.rows[0];
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+        
+        authSessions.set(`auth_${sessionToken}`, {
+            userId: user.id,
+            type: 'auth_success',
+            createdAt: Date.now()
+        });
+        
+        res.json({
+            success: true,
+            token: sessionToken,
+            user: {
+                id: user.id,
+                tgId: tgId,
+                username: user.username,
+                firstName: user.first_name,
+                lastName: user.last_name,
+                telegramUsername: user.telegram_username,
+                auth_provider: 'telegram',
+                avatarUrl: user.avatar_url
+            }
+        });
+        
+    } catch (error) {
+        console.error('Ошибка верификации Telegram:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 app.get('/api/user/debt/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
