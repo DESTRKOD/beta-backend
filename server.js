@@ -107,6 +107,17 @@ function delayRedirect(res, redirectUrl, delay = 1500) {
   `);
 }
 
+let maintenanceMode = {
+  active: false,
+  endTime: null,
+  duration: 0,
+  startedAt: null
+};
+
+function isMaintenanceActive() {
+  return maintenanceMode.active;
+}
+
 app.use(cors({
   origin: process.env.SITE_URL || 'https://duck-shop.onrender.com',
   credentials: true,
