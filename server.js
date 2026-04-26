@@ -7813,17 +7813,24 @@ app.post('/api/auth/telegram/verify', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Auth data expired' });
         }
         
-        const checkString = [
-            `auth_date=${auth_date}`,
-            `first_name=${first_name || ''}`,
-            `id=${id}`,
-            `last_name=${last_name || ''}`,
-            `photo_url=${photo_url || ''}`,
-            `username=${username || ''}`
-        ].sort().join('\n');
+        const dataCheckArr = [];
+        
+        if (id) dataCheckArr.push(`id=${id}`);
+        if (first_name) dataCheckArr.push(`first_name=${first_name}`);
+        if (last_name) dataCheckArr.push(`last_name=${last_name}`);
+        if (username) dataCheckArr.push(`username=${username}`);
+        if (photo_url) dataCheckArr.push(`photo_url=${photo_url}`);
+        if (auth_date) dataCheckArr.push(`auth_date=${auth_date}`);
+        
+        dataCheckArr.sort();
+        
+        const dataCheckString = dataCheckArr.join('\n');
         
         const secretKey = crypto.createHash('sha256').update(process.env.USER_BOT_TOKEN).digest();
-        const expectedHash = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
+        const expectedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+        
+        console.log('Ожидаемый hash:', expectedHash);
+        console.log('Полученный hash:', hash);
         
         if (hash !== expectedHash) {
             return res.status(400).json({ success: false, error: 'Invalid hash' });
@@ -7852,6 +7859,9 @@ app.post('/api/auth/telegram/verify', async (req, res) => {
                  WHERE id = $5`,
                 [first_name || null, last_name || null, username || null, photo_url || null, userResult.rows[0].id]
             );
+            
+            const refreshedUser = await pool.query('SELECT * FROM users WHERE id = $1', [userResult.rows[0].id]);
+            userResult = refreshedUser;
         }
         
         const user = userResult.rows[0];
