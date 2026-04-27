@@ -8557,9 +8557,22 @@ app.post('/api/auth/telegram/link/callback', async (req, res) => {
 
 app.post('/api/auth/logout', async (req, res) => {
   try {
-    res.json({
-      success: true,
-      message: 'Logged out successfully'
+    // Уничтожаем сессию
+    req.session.destroy((err) => {
+      if (err) {
+        console.error('Ошибка при уничтожении сессии:', err);
+        return res.status(500).json({ success: false, error: 'Logout failed' });
+      }
+      
+      // Очищаем cookie на клиенте
+      res.clearCookie('connect.sid', {
+        path: '/',
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'none'
+      });
+      
+      res.json({ success: true, message: 'Logged out successfully' });
     });
   } catch (error) {
     console.error('Ошибка выхода:', error);
