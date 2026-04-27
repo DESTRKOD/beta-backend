@@ -7683,7 +7683,8 @@ app.get('/api/auth/telegram/start', async (req, res) => {
             request_access: 'write',
             nonce: nonce,
             state: state,
-            redirect_uri: redirectUri
+            redirect_uri: redirectUri,
+            force_login: '1'  // 🔥 ДОБАВИЛИ — принудительный выбор аккаунта
         })}`;
         
         // 🔥 СОХРАНЯЕМ с проверкой authNonces
